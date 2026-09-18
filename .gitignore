@@ -1,3 +1,9 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+
+# 本地测试数据目录：真实照片只留在本机，不要上传到 GitHub
+data/
+# 历史遗留：data 曾被错误地当成空文件跟踪，这里一并忽略
+/data
