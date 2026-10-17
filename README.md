@@ -1,81 +1,107 @@
 # PhotoClassifier
 
-面向摄影工作流的 RAW 照片智能整理与筛选工具。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-一次拍摄动辄产生数百上千张照片：RAW、JPEG、视频混在一起，还有损坏文件和重复照片。
-传统的"按日期分文件夹"回答不了这样的问题——
+A smart RAW photo organizing and filtering tool for photography workflows.
 
-> "我现在想修所有夜景建筑照片。"
+A single shoot easily produces hundreds or thousands of photos: RAW files, JPEGs,
+and videos mixed together, plus corrupted files and duplicates. The traditional
+"folder by date" approach simply cannot answer questions like:
 
-PhotoClassifier 的目标是：**扫描并理解照片的信息（EXIF / 文件 / 将来的图像分析），
-让摄影师能按"我现在想处理什么"来快速找到照片**，然后把选出的照片交给
-Lightroom 等后期软件。
+> "I want to edit all my night-scene architecture photos right now."
 
-## 项目定位
+PhotoClassifier's goal: **scan and understand photo information (EXIF / file
+metadata / image analysis in future stages), so photographers can quickly find
+the photos they want to work on** — and then hand them off to Lightroom or other
+post-processing software.
 
-- PhotoClassifier **不是 Lightroom 的替代品**，而是 Lightroom **之前**的照片分析与筛选工具；
-- **不移动、不复制、不修改任何原始照片**——分类是"虚拟"的，存在数据库里，
-  硬盘上的 RAW 文件永远只保留一份；
-- 核心工作流：`相机 → 照片文件夹 → PhotoClassifier（扫描 + 分析 + 筛选）→ Lightroom（后期）`。
+## Project Positioning
 
-## 核心设计思想
+- PhotoClassifier is **not a Lightroom replacement** — it is the photo analysis
+  and filtering tool that runs **before** Lightroom;
+- It **never moves, copies, or modifies original photos** — classification is
+  "virtual", stored in a database; the RAW files on disk always stay exactly
+  where they are;
+- Core workflow: `camera → photo folder → PhotoClassifier (scan + analyze +
+  filter) → Lightroom (post-processing)`.
 
-1. **一张照片 ≠ 一个分类。** 一张夜景建筑照片可以同时属于 `#夜景`、`#建筑`、`#城市`，
-   因此采用"多标签 / 多属性"模型，而不是把照片扔进某一个文件夹。
-2. **原始文件只保留一份。** 标签和属性记录在数据库中，不因为多个分类而复制 RAW 文件。
-3. **原片安全优先。** 默认只做"读取 → 分析 → 建库 → 筛选"，绝不自动删除、修改或移动原片。
-4. **单个文件出错不能拖垮整个任务。** 3000 张里第 1532 张损坏？记录错误、跳过、继续，
-   最后给出完整报告。
-5. **AI 是可插拔的增强，不是核心依赖。** 能用 EXIF 和规则解决的，不引入 AI；
-   未来的视觉识别再按需加入。
+## Core Design Principles
 
-## 当前功能（V1.5）
+1. **One photo ≠ one category.** A night-scene architecture photo can be
+   `#night`, `#architecture`, and `#city` at the same time, so PhotoClassifier
+   uses a "multi-tag / multi-attribute" model instead of dropping each photo
+   into a single folder.
+2. **Original files are kept exactly once.** Tags and attributes live in the
+   database; RAW files are never duplicated across categories.
+3. **Original-photo safety first.** By default the tool only
+   "reads → analyzes → builds the database → filters". It never deletes,
+   modifies, or moves originals on its own.
+4. **A single bad file must never take down the whole job.** Photo #1532 of
+   3000 is corrupted? Log the error, skip it, keep going — and produce a full
+   report at the end.
+5. **AI is an optional, pluggable enhancement — not a core dependency.**
+   Whatever EXIF and rule-based logic can solve, we solve without AI; visual
+   recognition will be added later as needed.
 
-### V1：文件扫描与 NEF 基础支持 ✅
+## Current Features (V1.5)
 
-- 递归扫描任意真实摄影文件夹（支持 NEF / JPEG / PNG 混合存放）；
-- 按扩展名识别文件类型（大小写不敏感）：NEF、JPEG、PNG、视频（MOV / MP4 等）、未知格式；
-- 视频与未知格式只记录文件信息，不参与照片分析，也不会导致程序崩溃；
-- 扫描完全只读，不改动任何原始文件。
+### V1: Folder Scanning & Basic NEF Support ✅
 
-### V1.5：EXIF 与照片信息 ✅（当前版本）
+- Recursively scans any real-world photo folder (NEF / JPEG / PNG mixed
+  together);
+- Identifies file types by extension (case-insensitive): NEF, JPEG, PNG, video
+  (MOV / MP4, etc.), and unknown formats;
+- Videos and unknown formats are recorded as file info only — they never take
+  part in photo analysis and never crash the program;
+- Scanning is completely read-only; no original file is ever touched.
 
-- **零依赖的 EXIF 解析器**（`src/exif_reader.py`）：直接解析 NEF（TIFF 结构）
-  和 JPEG（APP1 段），读取——
-  - 拍摄时间、相机（厂商 + 型号）、镜头型号
-  - 焦距、光圈、快门速度、ISO、曝光补偿
-  - GPS 坐标（十进制度）
-  - 图片尺寸
-  - 同时支持大端 / 小端字节序的 TIFF；
-- **SQLite 照片信息数据库**（`src/database.py`）：以文件绝对路径为唯一键，
-  重复扫描时更新而不是重复插入，不需要任何第三方依赖；
-- **容错分级**：能区分"文件损坏"（标记异常）、"没有 EXIF"（正常处理，只是缺信息）、
-  "非照片文件"（只记录文件信息）三种情况；
-- **命令行工具**（`src/main.py`）：
-  - `scan`：扫描文件夹 → 读 EXIF → 写数据库 → 打印扫描报告；
-  - `show`：查看数据库中的照片记录（支持按文件名 / 路径模糊查找）；
-  - `stats`：数据库统计（按文件类型 / EXIF 状态 / 相机 / 镜头）。
+### V1.5: EXIF & Photo Information ✅ (current release)
 
-## 安装与使用
+- **Zero-dependency EXIF parser** (`src/exif_reader.py`): parses NEF (TIFF
+  structure) and JPEG (APP1 segment) directly, reading —
+  - capture time, camera (make + model), lens model
+  - focal length, aperture, shutter speed, ISO, exposure compensation
+  - GPS coordinates (decimal degrees)
+  - image dimensions
+  - both big-endian and little-endian TIFF are supported;
+- **SQLite photo information database** (`src/database.py`): keyed by absolute
+  file path; repeated scans update records instead of duplicating them — no
+  third-party dependencies;
+- **Graduated fault tolerance**: the tool distinguishes "file corrupted"
+  (flagged as an error), "no EXIF" (processed normally, just missing data),
+  and "non-photo file" (file info only);
+- **Command-line tool** (`src/main.py`):
+  - `scan`: scan a folder → read EXIF → write the database → print a scan
+    report;
+  - `show`: view photo records in the database (fuzzy match by file name or
+    path);
+  - `stats`: database statistics (by file type / EXIF status / camera / lens).
 
-要求：Python 3.12+（仅标准库，无第三方依赖）。
+## Installation & Usage
+
+Requirements: Python 3.12+ (standard library only, no third-party
+dependencies).
 
 ```bash
-# 1. 创建并激活虚拟环境（Windows PowerShell）
+# 1. Create and activate a virtual environment (Windows PowerShell)
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 
-# 2. 扫描一个真实照片文件夹（数据库默认写入 data/photos.db）
+# 2. Scan a real photo folder (database defaults to data/photos.db)
 python -m src.main scan "D:\Photos\2026"
 
-# 3. 查看某张照片的完整信息
+# 3. Show the full information of a specific photo
 python -m src.main show --match DSC_0012
 
-# 4. 查看统计
+# 4. Show statistics
 python -m src.main stats
 ```
 
-`scan` 的输出报告（对应规划文档的容错设计）：
+> Note: the CLI currently prints reports in Chinese; localization is planned
+> for a later stage. The samples below show actual program output.
+
+`scan` output report (following the fault-tolerance design in the project
+plan):
 
 ```
 扫描完成
@@ -94,7 +120,7 @@ python -m src.main stats
 任务完成。
 ```
 
-`show` 单张照片的输出示例：
+`show` output for a single photo:
 
 ```
 DSC_0001.NEF  [NEF]
@@ -114,74 +140,80 @@ DSC_0001.NEF  [NEF]
   EXIF：已读取
 ```
 
-> `data/` 目录已在 `.gitignore` 中：数据库和真实照片数据只留在本机，不会上传到 GitHub。
+> The `data/` directory is in `.gitignore`: the database and any real photo
+> data stay on your machine and are never uploaded to GitHub.
 
-## 运行测试
+## Running Tests
 
 ```bash
 python -m pytest
 ```
 
-测试共 92 个，全部使用按 TIFF / EXIF / PNG 规范合成的临时文件（见
-`tests/exif_maker.py`），不依赖任何真实照片，也不会触碰本机文件。
+The suite contains 92 tests, all based on temporary files synthesized to the
+TIFF / EXIF / PNG specifications (see `tests/exif_maker.py`) — no real photos
+are needed and no local files are touched.
 
-## 项目结构
+## Project Structure
 
 ```
 PhotoClassifier/
 ├── src/
-│   ├── scanner.py       # V1：只读文件夹扫描器（类型识别、容错）
-│   ├── photo_info.py    # V1.5：照片信息数据结构（文件信息 + EXIF 字段）
-│   ├── exif_reader.py   # V1.5：零依赖 EXIF 解析器（NEF/JPEG/PNG）
-│   ├── database.py      # V1.5：SQLite 照片信息数据库
-│   └── main.py          # V1.5：命令行入口（scan / show / stats）
+│   ├── scanner.py       # V1: read-only folder scanner (type detection, fault tolerance)
+│   ├── photo_info.py    # V1.5: photo info data structure (file info + EXIF fields)
+│   ├── exif_reader.py   # V1.5: zero-dependency EXIF parser (NEF/JPEG/PNG)
+│   ├── database.py      # V1.5: SQLite photo information database
+│   └── main.py          # V1.5: CLI entry point (scan / show / stats)
 ├── tests/
-│   ├── test_scanner.py      # V1 扫描器测试
-│   ├── test_exif_reader.py  # EXIF 解析测试（含损坏文件容错）
-│   ├── test_database.py     # 数据库读写测试
-│   ├── test_main.py         # CLI 与整体流程集成测试
-│   └── exif_maker.py        # 合成 NEF/JPEG/PNG 测试文件的辅助模块
-├── data/                # 本地数据目录（gitignore，数据库默认位置）
+│   ├── test_scanner.py      # V1 scanner tests
+│   ├── test_exif_reader.py  # EXIF parsing tests (incl. corrupted-file tolerance)
+│   ├── test_database.py     # database read/write tests
+│   ├── test_main.py         # CLI & end-to-end integration tests
+│   └── exif_maker.py        # helper to synthesize NEF/JPEG/PNG test files
+├── data/                # local data directory (gitignored; database default location)
 ├── pytest.ini
-└── README.md
+├── README.md            # this file (English)
+└── README.zh-CN.md      # Chinese README
 ```
 
-## 技术决策
+## Technical Decisions
 
-| 决策点 | 选择 | 理由 |
+| Decision | Choice | Rationale |
 | --- | --- | --- |
-| EXIF 读取 | 标准库自研最小解析器 | NEF 本质是 TIFF、JPEG 的 EXIF 在 APP1 段，所需字段全为标准标签；零依赖、完全离线，且能精确区分"损坏"与"无 EXIF" |
-| 数据库 | SQLite（标准库 `sqlite3`） | 单文件、零配置、够用；以绝对路径为主键支持重复扫描去重 |
-| 平台 | Windows 优先 | 第一阶段真实使用场景；代码不使用平台专属 API |
-| AI | 可选、可插拔 | EXIF + 规则优先；视觉识别（V3.5）时再评估传统 CV / 本地模型 / 云端 API |
+| EXIF reading | Minimal in-house parser on the standard library | NEF is essentially TIFF and JPEG EXIF lives in APP1; all needed fields are standard tags. Zero dependencies, fully offline, and it can precisely distinguish "corrupted" from "no EXIF" |
+| Database | SQLite (stdlib `sqlite3`) | Single file, zero configuration, sufficient; absolute-path primary key supports de-duplicated rescans |
+| Platform | Windows first | The real-world scenario for stage one; the code uses no platform-specific APIs |
+| AI | Optional & pluggable | EXIF + rules first; visual recognition (V3.5) will compare traditional CV / local models / cloud APIs |
 
-## 开发路线图
+## Roadmap
 
-| 阶段 | 内容 | 状态 |
+| Stage | Scope | Status |
 | --- | --- | --- |
-| V0 | 项目基础（仓库、虚拟环境、目录结构、README） | ✅ 完成 |
-| V1 | 文件扫描与 NEF 基础支持（类型识别、容错、报告） | ✅ 完成 |
-| V1.5 | EXIF 与照片信息（解析器、数据库、CLI） | ✅ 完成（当前） |
-| V2 | 规则分类（夜景 / 高感 / 慢门 / 长焦 / 广角 / 按相机镜头等，不依赖 AI） | 🔜 下一阶段 |
-| V2.5 | 图像质量分析（模糊 / 曝光异常 / 重复照片，仅提示不删除） | 计划中 |
-| V3 | 多标签系统（#夜景 #建筑 …，一张照片多个标签） | 计划中 |
-| V3.5 | 视觉识别（比较传统 CV / 本地模型 / AI API） | 计划中 |
-| V4 | 智能筛选（标签 + EXIF 条件的 AND / OR 组合） | 计划中 |
-| V5 | Lightroom 工作流（打开文件位置 / 批量路径 / 导出到文件夹） | 计划中 |
-| V6 | GUI 图形界面 | 计划中 |
+| V0 | Project foundation (repo, venv, structure, README) | ✅ Done |
+| V1 | Folder scanning & basic NEF support (type detection, fault tolerance, report) | ✅ Done |
+| V1.5 | EXIF & photo information (parser, database, CLI) | ✅ Done (current) |
+| V2 | Rule-based classification (night / high-ISO / slow shutter / telephoto / wide-angle / by camera & lens, no AI) | 🔜 Next |
+| V2.5 | Image quality analysis (blur / exposure anomalies / duplicates — hints only, never auto-delete) | Planned |
+| V3 | Multi-tag system (#night #architecture …; one photo, many tags) | Planned |
+| V3.5 | Visual recognition (compare traditional CV / local models / AI APIs) | Planned |
+| V4 | Smart filtering (AND / OR combos of tags + EXIF conditions) | Planned |
+| V5 | Lightroom workflow (reveal in Explorer / batch paths / export to folder) | Planned |
+| V6 | GUI | Planned |
 
-未来扩展：更多 RAW 格式（CR3 / ARW / RAF / DNG / ORF / RW2）、地图视图、时间线、
-相机镜头统计、相似照片聚类、批量重命名等。
+Future extensions: more RAW formats (CR3 / ARW / RAF / DNG / ORF / RW2), map
+view, timeline, camera & lens statistics, similar-photo clustering, batch
+renaming, and more.
 
-## 原始照片安全原则
+## Original-Photo Safety Principles
 
-整个项目必须遵守：
+The entire project must obey:
 
-- 默认不删除原片；
-- 默认不修改 RAW 文件；
-- 默认不移动原片；
-- 涉及文件移动、复制的操作（V5 导出）必须有明确的用户确认。
+- Never delete originals by default;
+- Never modify RAW files by default;
+- Never move originals by default;
+- Any operation that moves or copies files (V5 export) requires explicit user
+  confirmation.
 
 ---
 
-*项目总体规划与开发路线详见内部设计文档《PhotoClassifier 项目总体规划与开发路线》。*
+*See the internal design document "PhotoClassifier 项目总体规划与开发路线"
+(PhotoClassifier Project Master Plan & Development Roadmap) for the full plan.*
