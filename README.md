@@ -191,13 +191,13 @@ PhotoClassifier/
 | V0 | Project foundation (repo, venv, structure, README) | ✅ Done |
 | V1 | Folder scanning & basic NEF support (type detection, fault tolerance, report) | ✅ Done |
 | V1.5 | EXIF & photo information (parser, database, CLI) | ✅ Done (current) |
-| V2 | Rule-based classification (night / high-ISO / slow shutter / telephoto / wide-angle / by camera & lens, no AI) | 🔜 Next |
+| V2 | Rule-based classification (night / high-ISO / slow shutter / telephoto / wide-angle / by camera & lens, no AI) | Planned |
 | V2.5 | Image quality analysis (blur / exposure anomalies / duplicates — hints only, never auto-delete) | Planned |
 | V3 | Multi-tag system (#night #architecture …; one photo, many tags) | Planned |
 | V3.5 | Visual recognition (compare traditional CV / local models / AI APIs) | Planned |
 | V4 | Smart filtering (AND / OR combos of tags + EXIF conditions) | Planned |
 | V5 | Lightroom workflow (reveal in Explorer / batch paths / export to folder) | Planned |
-| V6 | GUI | Planned |
+| V6 | GUI (pulled forward: design mockups done; PySide6 chosen) | 🎨 In design |
 
 Future extensions: more RAW formats (CR3 / ARW / RAF / DNG / ORF / RW2), map
 view, timeline, camera & lens statistics, similar-photo clustering, batch
