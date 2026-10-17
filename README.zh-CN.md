@@ -58,6 +58,18 @@ Lightroom 等后期软件。
   - `show`：查看数据库中的照片记录（支持按文件名 / 路径模糊查找）；
   - `stats`：数据库统计（按文件类型 / EXIF 状态 / 相机 / 镜头）。
 
+### GUI 外壳（GUI V1.5）✅
+
+- **文件夹库**：可导入多个文件夹、勾选参与扫描、多文件夹依次扫描；
+- **后台扫描**：进度条 + 当前文件 + 实时成功/异常计数，可随时取消；
+- **结果列表**：文件名、类型、拍摄时间、相机、ISO、快门、大小；
+- **详情面板**：完整照片信息（与数据库字段一致）+
+  「打开文件位置」「复制路径」；
+- **占位控件**：标签筛选（V3）、参数条件（V4）、导出 / 导入到 Lightroom（V5）
+  均已画出并禁用，随版本接入；
+- 启动方式：桌面快捷方式（指向 `run_gui.pyw`），或
+  `python -m src.gui` / `pythonw run_gui.pyw`。
+
 ## 安装与使用
 
 要求：Python 3.12+（仅标准库，无第三方依赖）。
@@ -124,8 +136,9 @@ DSC_0001.NEF  [NEF]
 python -m pytest
 ```
 
-测试共 92 个，全部使用按 TIFF / EXIF / PNG 规范合成的临时文件（见
-`tests/exif_maker.py`），不依赖任何真实照片，也不会触碰本机文件。
+测试共 101 个，全部使用按 TIFF / EXIF / PNG 规范合成的临时文件（见
+`tests/exif_maker.py`），不依赖任何真实照片，也不会触碰本机文件；GUI 测试
+在后台构建真实窗口（不进入主循环、不弹窗）。
 
 ## 项目结构
 
@@ -135,15 +148,19 @@ PhotoClassifier/
 │   ├── scanner.py       # V1：只读文件夹扫描器（类型识别、容错）
 │   ├── photo_info.py    # V1.5：照片信息数据结构（文件信息 + EXIF 字段）
 │   ├── exif_reader.py   # V1.5：零依赖 EXIF 解析器（NEF/JPEG/PNG）
-│   ├── database.py      # V1.5：SQLite 照片信息数据库
-│   └── main.py          # V1.5：命令行入口（scan / show / stats）
+│   ├── database.py      # V1.5：SQLite 照片信息数据库（含文件夹库）
+│   ├── main.py          # V1.5：命令行入口（scan / show / stats）
+│   └── gui.py           # GUI V1.5：图形界面外壳（Tkinter）
 ├── tests/
 │   ├── test_scanner.py      # V1 扫描器测试
 │   ├── test_exif_reader.py  # EXIF 解析测试（含损坏文件容错）
 │   ├── test_database.py     # 数据库读写测试
 │   ├── test_main.py         # CLI 与整体流程集成测试
+│   ├── test_gui.py          # GUI 外壳测试
 │   └── exif_maker.py        # 合成 NEF/JPEG/PNG 测试文件的辅助模块
+├── assets/              # 应用图标
 ├── data/                # 本地数据目录（gitignore，数据库默认位置）
+├── run_gui.pyw          # GUI 启动器（桌面快捷方式指向此文件）
 ├── pytest.ini
 ├── README.md            # 英文版（默认）
 └── README.zh-CN.md      # 中文版
@@ -171,7 +188,7 @@ PhotoClassifier/
 | V3.5 | 视觉识别（比较传统 CV / 本地模型 / AI API） | 计划中 |
 | V4 | 智能筛选（标签 + EXIF 条件的 AND / OR 组合） | 计划中 |
 | V5 | Lightroom 工作流（打开文件位置 / 批量路径 / 导出到文件夹） | 计划中 |
-| V6 | GUI 图形界面（提前启动：设计稿完成，选定 PySide6） | 🎨 设计中 |
+| V6 | GUI 图形界面（提前启动：外壳已实现——文件夹库、扫描进度、详情面板；Tkinter，待环境允许后评估迁移 PySide6） | 🔨 外壳已实现 |
 
 未来扩展：更多 RAW 格式（CR3 / ARW / RAF / DNG / ORF / RW2）、地图视图、时间线、
 相机镜头统计、相似照片聚类、批量重命名等。

@@ -288,3 +288,81 @@ def test_empty_upsert_many_writes_nothing(db_path: Path) -> None:
     with PhotoDatabase.open(db_path) as db:
         assert db.upsert_many([]) == 0
         assert db.count_photos() == 0
+
+
+# --------------------------------------------------------------------------- #
+# 6. 文件夹库
+# --------------------------------------------------------------------------- #
+
+
+def test_folder_library_add_list_remove(db_path: Path) -> None:
+    with PhotoDatabase.open(db_path) as db:
+        db.add_folder("D:/Photos/2026")
+        db.add_folder("D:/Photos/2026")  # 重复添加被忽略
+        db.add_folder("D:/Photos/2025")
+
+        folders = db.list_folders()
+        assert [f.path for f in folders] == [
+            Path("D:/Photos/2025").resolve(),
+            Path("D:/Photos/2026").resolve(),
+        ]
+        assert all(f.photo_count == 0 for f in folders)
+        assert all(f.last_scanned_at is None for f in folders)
+
+        db.remove_folder("D:/Photos/2025")
+        assert len(db.list_folders()) == 1
+
+
+def test_mark_folder_scanned_creates_and_updates(db_path: Path) -> None:
+    with PhotoDatabase.open(db_path) as db:
+        db.mark_folder_scanned("D:/Photos/2026")
+        first = db.list_folders()[0]
+        assert first.last_scanned_at is not None
+
+        db.mark_folder_scanned("D:/Photos/2026")
+        assert len(db.list_folders()) == 1
+
+
+def test_photo_count_under_folder(db_path: Path) -> None:
+    with PhotoDatabase.open(db_path) as db:
+        db.add_folder("D:/Photos/2026")
+        db.upsert_many(
+            [
+                make_info(Path("D:/Photos/2026/a.NEF")),
+                make_info(Path("D:/Photos/2026/sub/b.NEF")),
+                make_info(Path("D:/Photos/20260/c.NEF")),  # 前缀相似但不是子文件夹
+                make_info(Path("D:/Photos/2025/d.NEF")),
+            ]
+        )
+
+        assert db.count_photos_under("D:/Photos/2026") == 2
+        folders = {f.path.name: f.photo_count for f in db.list_folders()}
+        assert folders["2026"] == 2
+
+
+def test_find_photos_under_folders(db_path: Path) -> None:
+    with PhotoDatabase.open(db_path) as db:
+        db.upsert_many(
+            [
+                make_info(Path("D:/Photos/2026/a.NEF")),
+                make_info(Path("D:/Photos/2025/b.NEF")),
+                make_info(Path("D:/Other/c.NEF")),
+            ]
+        )
+
+        found = db.find_photos_under(["D:/Photos/2026", "D:/Photos/2025"])
+        assert {info.file_name for info in found} == {"a.NEF", "b.NEF"}
+
+        assert db.find_photos_under([]) == []
+        assert len(db.find_photos_under(["D:/Photos"], limit=1)) == 1
+
+
+def test_remove_folder_keeps_photo_records(db_path: Path) -> None:
+    with PhotoDatabase.open(db_path) as db:
+        db.add_folder("D:/Photos/2026")
+        db.upsert_photo(make_info(Path("D:/Photos/2026/a.NEF")))
+
+        db.remove_folder("D:/Photos/2026")
+
+        assert db.list_folders() == []
+        assert db.count_photos() == 1  # 只移除库条目，不动照片记录

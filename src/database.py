@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 from src.photo_info import EXIF_STATUSES, PhotoInfo
 
@@ -91,6 +92,12 @@ CREATE TABLE IF NOT EXISTS photos (
 CREATE INDEX IF NOT EXISTS idx_photos_category ON photos (category);
 CREATE INDEX IF NOT EXISTS idx_photos_taken_at ON photos (taken_at);
 CREATE INDEX IF NOT EXISTS idx_photos_file_name ON photos (file_name);
+
+CREATE TABLE IF NOT EXISTS folders (
+    path            TEXT PRIMARY KEY,
+    added_at        TEXT NOT NULL,
+    last_scanned_at TEXT
+);
 """
 
 #: 按 path 去重的写入语句（列清单固定，编译一次即可）。
@@ -126,6 +133,20 @@ ON CONFLICT(path) DO UPDATE SET
 def _now() -> str:
     """当前本地时间，统一格式。"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+@dataclass(frozen=True)
+class FolderInfo:
+    """文件夹库中的一条记录（GUI 的"文件夹库"面板使用）。"""
+
+    path: Path
+    added_at: str
+    last_scanned_at: str | None
+    photo_count: int
+
+    @property
+    def name(self) -> str:
+        return self.path.name or str(self.path)
 
 
 def _photo_values(info: PhotoInfo, *, for_insert: bool) -> tuple:
@@ -284,6 +305,84 @@ class PhotoDatabase:
             counts[label] = counts.get(label, 0) + n
         return counts
 
+    # ---- 文件夹库 -------------------------------------------------------- #
+
+    def add_folder(self, path: str | Path) -> None:
+        """把一个文件夹加入文件夹库（已存在时忽略）。"""
+        key = str(Path(path).resolve())
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO folders (path, added_at) VALUES (?, ?)",
+                (key, _now()),
+            )
+
+    def remove_folder(self, path: str | Path) -> None:
+        """从文件夹库移除一个文件夹（不删除照片记录，更不碰原片）。"""
+        key = str(Path(path).resolve())
+        with self._conn:
+            self._conn.execute("DELETE FROM folders WHERE path = ?", (key,))
+
+    def mark_folder_scanned(self, path: str | Path) -> None:
+        """确保文件夹在库中，并更新其最近扫描时间。"""
+        key = str(Path(path).resolve())
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO folders (path, added_at, last_scanned_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET last_scanned_at=excluded.last_scanned_at
+                """,
+                (key, _now(), _now()),
+            )
+
+    def list_folders(self) -> list[FolderInfo]:
+        """返回文件夹库全部记录（按路径排序），附带各自的照片数量。"""
+        rows = self._conn.execute(
+            "SELECT path, added_at, last_scanned_at FROM folders ORDER BY path"
+        ).fetchall()
+        result = []
+        for row in rows:
+            result.append(
+                FolderInfo(
+                    path=Path(row["path"]),
+                    added_at=row["added_at"],
+                    last_scanned_at=row["last_scanned_at"],
+                    photo_count=self.count_photos_under(row["path"]),
+                )
+            )
+        return result
+
+    def count_photos_under(self, folder: str | Path) -> int:
+        """统计某个文件夹（含子文件夹）下的照片记录数。"""
+        row = self._conn.execute(
+            f"SELECT COUNT(*) AS n FROM photos WHERE path LIKE ? ESCAPE '\\'",
+            (_like_prefix(folder),),
+        ).fetchone()
+        return int(row["n"])
+
+    def find_photos_under(
+        self, folders: Iterable[str | Path], *, limit: int = 20000
+    ) -> list[PhotoInfo]:
+        """返回给定文件夹集合（含子文件夹）下的照片记录，按路径排序。"""
+        clauses = []
+        params: list[str] = []
+        for folder in folders:
+            clauses.append("path LIKE ? ESCAPE '\\'")
+            params.append(_like_prefix(folder))
+        if not clauses:
+            return []
+        params.append(max(1, int(limit)))
+        cursor = self._conn.execute(
+            f"""
+            SELECT {', '.join(_PHOTO_COLUMNS)} FROM photos
+            WHERE {' OR '.join(clauses)}
+            ORDER BY path
+            LIMIT ?
+            """,
+            params,
+        )
+        return [_row_to_photo_info(row) for row in cursor.fetchall()]
+
 
 # --------------------------------------------------------------------------- #
 # 内部工具
@@ -293,6 +392,15 @@ class PhotoDatabase:
 def _escape_like(text: str) -> str:
     """转义 LIKE 中的 % _ \\ 。"""
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _like_prefix(folder: str | Path) -> str:
+    """构造"该文件夹及其子文件夹"的 LIKE 前缀模式。
+
+    注意：路径分隔符本身也要转义（\\\\ 表示字面量 \\），
+    末尾接未转义的 % 作为通配符。
+    """
+    return _escape_like(str(Path(folder).resolve())) + "\\\\%"
 
 
 def _row_to_photo_info(row: sqlite3.Row) -> PhotoInfo:

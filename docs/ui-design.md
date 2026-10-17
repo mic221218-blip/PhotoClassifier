@@ -76,12 +76,18 @@ graduated fault tolerance of V1.5 (corrupted / no-EXIF / non-photo).
 
 ## 5. Technology Decision
 
-**PySide6 (Qt)** — decided on 2026-10-18. Mature desktop widgets, high-DPI
-support, good CJK text rendering, model/view for large photo lists, easy
-packaging with PyInstaller. It will be added as an optional dependency
-(`requirements-dev.txt` or extras) so the core stays dependency-free.
-Tkinter (stdlib, but dated look) was considered and set aside; browser-based
-options (Electron/Flet) are overkill for a Windows-first desktop tool.
+**Target framework: PySide6 (Qt)** — decided on 2026-10-18. Mature desktop
+widgets, high-DPI support, good CJK text rendering, model/view for large photo
+lists, easy packaging with PyInstaller. It will be added as an optional
+dependency so the core stays dependency-free.
+
+> **Implementation note (2026-10-18, GUI V1.5 shell)**: the current development
+> environment cannot reach PyPI, so the first working shell is implemented with
+> the **standard-library Tkinter**, following the same layout and interactions
+> as this design. The database and scan layers are UI-agnostic and fully
+> reusable; migration to PySide6 happens when the environment allows installing
+> it. This is a pragmatic call under environment constraints, not a reversal of
+> the decision.
 
 ## 6. Open Questions (for later stages)
 
@@ -102,6 +108,11 @@ options (Electron/Flet) are overkill for a Windows-first desktop tool.
 
 ## 8. Changelog
 
+- r3 (2026-10-18): **GUI V1.5 shell implemented** (Tkinter — PySide6 cannot be
+  installed in this environment; layout and interactions follow this design):
+  folder library, background scan with progress + cancel, results list, detail
+  panel, reveal in Explorer / copy path; filter / export / Lightroom stay as
+  disabled placeholders. The desktop shortcut points at `run_gui.pyw`.
 - r2 (2026-10-18): added **folder library** to the left panel (multi-folder
   browsing and multi-folder scans, wired at GUI V1.5); added **Import to
   Lightroom** action next to Export (V5 placeholder); framework decision made

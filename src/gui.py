@@ -1,0 +1,745 @@
+"""PhotoClassifier GUI 外壳（GUI V1.5，Tkinter 实现）。
+
+按已确认的 UI 设计稿（docs/ui-design.md）实现第一版界面：
+
+- 顶部工具栏：文件夹路径 + 浏览… + 开始扫描（V1.5 能力）；
+- 左侧：文件夹库（多文件夹、勾选参与扫描，V1.5 能力）
+  + 筛选面板（V3/V4 占位，禁用）；
+- 中部：扫描结果列表（文件信息，V1.5 能力）+ 扫描进度视图（可取消）；
+- 右侧：详情面板（完整照片信息；打开文件位置 / 复制路径可用，
+  导出与导入到 Lightroom 为 V5 占位）；
+- 底部状态栏：扫描报告摘要 + 数据库位置。
+
+技术说明：设计文档原定 PySide6，但当前环境无法访问 PyPI，
+故第一版用标准库 Tkinter 实现同样的布局与交互；模块按"界面构建 + 数据刷新"
+组织，后续如迁移 PySide6 可以复用数据库层与扫描流程。
+
+安全原则：GUI 全程只读原始照片，绝不删除 / 移动 / 修改任何文件。
+"""
+
+from __future__ import annotations
+
+import queue
+import subprocess
+import sys
+import threading
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
+
+from src.database import PhotoDatabase
+from src.exif_reader import read_photo_info
+from src.main import format_shutter, format_size
+from src.photo_info import EXIF_ERROR, EXIF_NO_EXIF, EXIF_OK, PhotoInfo
+from src.scanner import scan_folder
+
+#: 项目根目录（src/ 的上一级）。数据库默认位置与其解耦于当前工作目录。
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DB = PROJECT_ROOT / "data" / "photos.db"
+ICON_PATH = PROJECT_ROOT / "assets" / "photoclassifier.ico"
+
+# --------------------------------------------------------------------------- #
+# 深色主题调色板（与设计稿一致）
+# --------------------------------------------------------------------------- #
+
+WIN_BG = "#1b1c21"
+PANEL_BG = "#202127"
+CARD_BG = "#23242b"
+INPUT_BG = "#26272e"
+BORDER = "#2f313b"
+BORDER_SOFT = "#2a2b33"
+ACCENT = "#4c8dff"
+ACCENT_DIM = "#31415e"
+GREEN = "#3fb27f"
+ORANGE = "#e8a33d"
+TEXT = "#e9eaf0"
+TEXT_SUB = "#9a9dab"
+TEXT_FAINT = "#6e717e"
+
+#: 结果列表的列定义：(键, 标题, 宽度, 锚)
+_RESULT_COLUMNS = [
+    ("name", "文件名", 210, "w"),
+    ("category", "类型", 70, "w"),
+    ("taken_at", "拍摄时间", 150, "w"),
+    ("camera", "相机", 140, "w"),
+    ("iso", "ISO", 70, "e"),
+    ("shutter", "快门", 90, "e"),
+    ("size", "大小", 90, "e"),
+]
+
+#: 详情面板展示的字段（与 V1.5 数据库字段一一对应）
+_DETAIL_FIELDS = [
+    ("拍摄时间", lambda i: i.taken_at),
+    ("相机", lambda i: i.camera),
+    ("镜头", lambda i: i.lens_model),
+    ("焦距", lambda i: _mm(i.focal_length_mm)),
+    ("光圈", lambda i: _f_number(i.f_number)),
+    ("快门", lambda i: format_shutter(i.exposure_time_s) if i.exposure_time_s else None),
+    ("ISO", lambda i: str(i.iso) if i.iso is not None else None),
+    ("曝光补偿", lambda i: _ev(i.exposure_bias_ev)),
+    ("GPS", lambda i: f"{i.gps_latitude:.6f}, {i.gps_longitude:.6f}" if i.has_gps else None),
+    ("尺寸", lambda i: f"{i.width_px} x {i.height_px}" if i.width_px else None),
+    ("修改时间", lambda i: i.modified_at),
+]
+
+#: 分类对应的预览渐变色（顶部色, 底部色）
+_PREVIEW_COLORS = {
+    "nef": ((58, 48, 92), (206, 120, 74)),
+    "jpeg": ((30, 52, 84), (120, 160, 150)),
+    "png": ((28, 44, 60), (104, 170, 130)),
+    "video": ((40, 41, 48), (64, 66, 76)),
+    "unsupported": ((40, 41, 48), (64, 66, 76)),
+}
+
+
+def _mm(value):
+    return f"{value:g} mm" if value is not None else None
+
+
+def _f_number(value):
+    return f"f/{value:g}" if value is not None else None
+
+
+def _ev(value):
+    if value is None:
+        return None
+    return "0 EV" if value == 0 else f"{value:+.1f} EV"
+
+
+class PhotoClassifierApp:
+    """主窗口应用。``root`` 由调用方创建，方便测试与自检。"""
+
+    def __init__(self, root: tk.Tk, db_path: str | Path = DEFAULT_DB):
+        self.root = root
+        self.db = PhotoDatabase.open(db_path)
+        self.db_path = Path(db_path)
+
+        self.checked_folders: set[str] = set()
+        self.infos_by_iid: dict[str, PhotoInfo] = {}
+        self.current: PhotoInfo | None = None
+        self.scan_thread: threading.Thread | None = None
+        self.cancel_event = threading.Event()
+        self.msg_queue: queue.Queue = queue.Queue()
+
+        self._setup_window()
+        self._build_styles()
+        self._build_toolbar()
+        self._build_left_panel()
+        self._build_center()
+        self._build_detail_panel()
+        self._build_status_bar()
+
+        self.refresh_library()
+        self.refresh_results()
+        self.refresh_status_bar()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ------------------------------------------------------------------ #
+    # 窗口与样式
+    # ------------------------------------------------------------------ #
+
+    def _setup_window(self) -> None:
+        self.root.title("PhotoClassifier")
+        self.root.geometry("1400x840")
+        self.root.minsize(1120, 680)
+        self.root.configure(bg=WIN_BG)
+        if ICON_PATH.exists():
+            try:
+                self.root.iconbitmap(str(ICON_PATH))
+            except tk.TclError:
+                pass
+
+    def _font(self, size=10, bold=False):
+        return tkfont.Font(family="Microsoft YaHei", size=size, weight="bold" if bold else "normal")
+
+    def _build_styles(self) -> None:
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(
+            "Treeview",
+            background=CARD_BG,
+            fieldbackground=CARD_BG,
+            foreground=TEXT,
+            rowheight=28,
+            borderwidth=0,
+            font=self._font(10),
+        )
+        style.map("Treeview", background=[("selected", ACCENT_DIM)], foreground=[("selected", TEXT)])
+        style.configure(
+            "Treeview.Heading",
+            background=PANEL_BG,
+            foreground=TEXT_SUB,
+            relief="flat",
+            font=self._font(9),
+        )
+        style.map("Treeview.Heading", background=[("active", PANEL_BG)])
+        style.configure(
+            "Horizontal.TProgressbar",
+            background=ACCENT,
+            troughcolor=INPUT_BG,
+            borderwidth=0,
+            thickness=10,
+        )
+        style.configure("Vertical.TScrollbar", background=INPUT_BG, troughcolor=WIN_BG, borderwidth=0)
+        style.configure("Horizontal.TScrollbar", background=INPUT_BG, troughcolor=WIN_BG, borderwidth=0)
+
+    def _button(self, parent, text, command=None, *, primary=False, disabled=False, width=None):
+        btn = tk.Button(
+            parent,
+            text=text,
+            command=command if not disabled else None,
+            font=self._font(10, bold=primary),
+            bg=ACCENT if primary and not disabled else INPUT_BG,
+            fg="#ffffff" if primary and not disabled else (TEXT_FAINT if disabled else TEXT),
+            disabledforeground=TEXT_FAINT,
+            activebackground=ACCENT_DIM if not primary else ACCENT,
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=5,
+            cursor="arrow" if disabled else "hand2",
+            state="disabled" if disabled else "normal",
+            width=width,
+        )
+        return btn
+
+    # ------------------------------------------------------------------ #
+    # 顶部工具栏
+    # ------------------------------------------------------------------ #
+
+    def _build_toolbar(self) -> None:
+        bar = tk.Frame(self.root, bg=WIN_BG, height=60)
+        bar.pack(fill="x", side="top")
+        bar.pack_propagate(False)
+
+        tk.Label(bar, text="文件夹", bg=WIN_BG, fg=TEXT_SUB, font=self._font(10)).pack(
+            side="left", padx=(20, 8)
+        )
+        self.folder_var = tk.StringVar(value="")
+        entry = tk.Entry(
+            bar,
+            textvariable=self.folder_var,
+            bg=INPUT_BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=("Consolas", 10),
+            state="readonly",
+            readonlybackground=INPUT_BG,
+        )
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 10), ipady=6)
+        self.btn_browse = self._button(bar, "浏览…", self.add_folder_dialog)
+        self.btn_browse.pack(side="left", padx=(0, 10))
+        self.btn_scan = self._button(bar, "开始扫描", self.start_scan, primary=True)
+        self.btn_scan.pack(side="left", padx=(0, 12))
+        tk.Label(
+            bar, text="只读扫描 · 不会改动原始文件", bg=WIN_BG, fg=TEXT_FAINT, font=self._font(9)
+        ).pack(side="left", padx=(0, 16))
+
+    # ------------------------------------------------------------------ #
+    # 左侧：文件夹库 + 筛选占位
+    # ------------------------------------------------------------------ #
+
+    def _build_left_panel(self) -> None:
+        panel = tk.Frame(self.root, bg=PANEL_BG, width=286)
+        panel.pack(side="left", fill="y")
+        panel.pack_propagate(False)
+
+        tk.Label(panel, text="文件夹库", bg=PANEL_BG, fg=TEXT, font=self._font(11, bold=True)).pack(
+            anchor="w", padx=16, pady=(14, 6)
+        )
+        self.library_tree = ttk.Treeview(panel, show="tree", selectmode="browse", height=5)
+        self.library_tree.pack(fill="x", padx=12)
+        self.library_tree.bind("<ButtonRelease-1>", self._on_library_click)
+
+        btn_row = tk.Frame(panel, bg=PANEL_BG)
+        btn_row.pack(fill="x", padx=12, pady=(8, 4))
+        self.btn_add = self._button(btn_row, "+ 添加文件夹", self.add_folder_dialog)
+        self.btn_add.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.btn_remove = self._button(btn_row, "移除", self.remove_selected_folder)
+        self.btn_remove.pack(side="left")
+
+        tk.Frame(panel, bg=BORDER_SOFT, height=1).pack(fill="x", padx=12, pady=10)
+
+        tk.Label(panel, text="筛选", bg=PANEL_BG, fg=TEXT, font=self._font(11, bold=True)).pack(
+            anchor="w", padx=16, pady=(0, 2)
+        )
+        tk.Label(
+            panel, text="占位：标签 V3 · 参数条件 V4 接入后可用", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        tags = tk.Frame(panel, bg=PANEL_BG)
+        tags.pack(fill="x", padx=16)
+        for i, (label, checked) in enumerate(
+            [("夜景", True), ("建筑", True), ("天空", False), ("人物", False)]
+        ):
+            tk.Checkbutton(
+                tags,
+                text=label,
+                bg=PANEL_BG,
+                fg=TEXT_SUB,
+                disabledforeground=TEXT_SUB,
+                selectcolor=INPUT_BG,
+                state="disabled",
+            ).grid(row=i // 2, column=i % 2, sticky="w", pady=2)
+
+        params = tk.Frame(panel, bg=PANEL_BG)
+        params.pack(fill="x", padx=16, pady=(10, 0))
+        for i, label in enumerate(("ISO ≥", "焦距 ≥", "快门 ≤")):
+            tk.Label(params, text=label, bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9)).grid(
+                row=i, column=0, sticky="w", pady=3
+            )
+            tk.Entry(
+                params, bg=INPUT_BG, fg=TEXT_FAINT, relief="flat", width=12, state="disabled",
+                disabledbackground=INPUT_BG, disabledforeground=TEXT_FAINT, font=self._font(9),
+            ).grid(row=i, column=1, sticky="w", padx=(12, 0), pady=3, ipady=3)
+
+        self.btn_filter = self._button(panel, "应用筛选", None, primary=True, disabled=True)
+        self.btn_filter.pack(fill="x", padx=16, pady=(16, 10), ipady=2)
+
+    # ------------------------------------------------------------------ #
+    # 中部：结果列表 + 扫描进度
+    # ------------------------------------------------------------------ #
+
+    def _build_center(self) -> None:
+        center = tk.Frame(self.root, bg=WIN_BG)
+        center.pack(side="left", fill="both", expand=True)
+
+        header = tk.Frame(center, bg=WIN_BG)
+        header.pack(fill="x", padx=18, pady=(12, 6))
+        tk.Label(header, text="扫描结果", bg=WIN_BG, fg=TEXT, font=self._font(11, bold=True)).pack(
+            side="left"
+        )
+        self.count_label = tk.Label(header, text="", bg=WIN_BG, fg=TEXT_SUB, font=self._font(9))
+        self.count_label.pack(side="left", padx=(12, 0))
+
+        # 扫描进度视图（扫描时显示，平时隐藏）
+        self.progress_frame = tk.Frame(center, bg=WIN_BG)
+        self.progress_title = tk.Label(self.progress_frame, text="", bg=WIN_BG, fg=TEXT, font=self._font(12, bold=True))
+        self.progress_title.pack(pady=(70, 8))
+        self.progress_folder = tk.Label(self.progress_frame, text="", bg=WIN_BG, fg=TEXT_SUB, font=("Consolas", 10))
+        self.progress_folder.pack()
+        self.progress_bar = ttk.Progressbar(self.progress_frame, length=560, mode="determinate")
+        self.progress_bar.pack(pady=16)
+        self.progress_detail = tk.Label(self.progress_frame, text="", bg=WIN_BG, fg=TEXT, font=self._font(10))
+        self.progress_detail.pack()
+        self.progress_current = tk.Label(self.progress_frame, text="", bg=WIN_BG, fg=TEXT_SUB, font=self._font(9))
+        self.progress_current.pack(pady=(6, 0))
+        self.btn_cancel = self._button(self.progress_frame, "取消", self.cancel_scan)
+        self.btn_cancel.pack(pady=20, ipady=2)
+
+        # 结果列表
+        self.result_frame = tk.Frame(center, bg=WIN_BG)
+        self.result_frame.pack(fill="both", expand=True)
+        cols = [key for key, *_ in _RESULT_COLUMNS]
+        self.result_tree = ttk.Treeview(self.result_frame, columns=cols, show="headings")
+        for key, title, width, anchor in _RESULT_COLUMNS:
+            self.result_tree.heading(key, text=title)
+            self.result_tree.column(key, width=width, anchor=anchor, stretch=(key == "name"))
+        vsb = ttk.Scrollbar(self.result_frame, orient="vertical", command=self.result_tree.yview)
+        self.result_tree.configure(yscrollcommand=vsb.set)
+        self.result_tree.pack(side="left", fill="both", expand=True, padx=(0, 0))
+        vsb.pack(side="left", fill="y", padx=(0, 8))
+        self.result_tree.tag_configure("error", foreground=ORANGE)
+        self.result_tree.tag_configure("dim", foreground=TEXT_SUB)
+        self.result_tree.bind("<<TreeviewSelect>>", self._on_result_select)
+        self.result_tree.bind("<Double-1>", lambda _e: self.reveal_selected())
+
+    # ------------------------------------------------------------------ #
+    # 右侧：详情面板
+    # ------------------------------------------------------------------ #
+
+    def _build_detail_panel(self) -> None:
+        panel = tk.Frame(self.root, bg=PANEL_BG, width=380)
+        panel.pack(side="right", fill="y")
+        panel.pack_propagate(False)
+        self.detail_panel = panel
+        pad = dict(anchor="w", padx=18)
+
+        self.preview_canvas = tk.Canvas(panel, bg=CARD_BG, height=130, highlightthickness=0)
+        self.preview_canvas.pack(fill="x", padx=14, pady=(14, 0))
+
+        name_row = tk.Frame(panel, bg=PANEL_BG)
+        name_row.pack(fill="x", padx=18, pady=(10, 0))
+        self.detail_name = tk.Label(name_row, text="未选择照片", bg=PANEL_BG, fg=TEXT, font=self._font(12, bold=True))
+        self.detail_name.pack(side="left")
+        self.badge_format = tk.Label(name_row, text="", bg=INPUT_BG, fg=ACCENT, font=self._font(8, bold=True))
+        self.badge_format.pack(side="left", padx=(8, 4), ipadx=5, ipady=1)
+        self.badge_status = tk.Label(name_row, text="", bg=INPUT_BG, fg=GREEN, font=self._font(8, bold=True))
+        self.badge_status.pack(side="left", ipadx=5, ipady=1)
+
+        self.detail_meta = tk.Label(panel, text="", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(8))
+        self.detail_meta.pack(fill="x", padx=18, pady=(4, 8))
+        tk.Frame(panel, bg=BORDER_SOFT, height=1).pack(fill="x", padx=18)
+
+        self.detail_rows = tk.Frame(panel, bg=PANEL_BG)
+        self.detail_rows.pack(fill="x", padx=18, pady=(8, 0))
+
+        tk.Frame(panel, bg=BORDER_SOFT, height=1).pack(fill="x", padx=18, pady=(8, 10))
+        actions = tk.Frame(panel, bg=PANEL_BG)
+        actions.pack(fill="x", padx=18)
+        self.btn_reveal = self._button(actions, "打开文件位置", self.reveal_selected)
+        self.btn_reveal.pack(side="left", padx=(0, 8), ipady=2)
+        self.btn_copy = self._button(actions, "复制路径", self.copy_selected_path)
+        self.btn_copy.pack(side="left", ipady=2)
+        actions2 = tk.Frame(panel, bg=PANEL_BG)
+        actions2.pack(fill="x", padx=18, pady=(8, 0))
+        self._button(actions2, "导出…", None, disabled=True).pack(side="left", padx=(0, 8), ipady=2)
+        self._button(actions2, "导入到 Lightroom", None, disabled=True).pack(side="left", ipady=2)
+        tk.Label(
+            panel,
+            text="导出只复制不移动；交给 Lightroom 前需确认（V5 接入）",
+            bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8),
+        ).pack(fill="x", padx=18, pady=(10, 0))
+        self.set_detail(None)
+
+    def _draw_preview(self, info: PhotoInfo | None) -> None:
+        canvas = self.preview_canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 100)
+        height = int(canvas["height"])
+        top, bottom = _PREVIEW_COLORS.get(info.category if info else None, ((40, 41, 48), (64, 66, 76)))
+        for y in range(height):
+            t = y / max(height - 1, 1)
+            color = "#%02x%02x%02x" % tuple(round(a * (1 - t) + b * t) for a, b in zip(top, bottom))
+            canvas.create_line(0, y, width, y, fill=color)
+        label = info.category.upper() if info else "—"
+        canvas.create_text(
+            width / 2, height / 2, text=label, fill="#c9cbd6", font=("Consolas", 18, "bold")
+        )
+
+    def set_detail(self, info: PhotoInfo | None) -> None:
+        """刷新右侧详情面板。"""
+        self.current = info
+        self._draw_preview(info)
+        if info is None:
+            self.detail_name.config(text="未选择照片")
+            self.badge_format.config(text="")
+            self.badge_status.config(text="")
+            self.detail_meta.config(text="")
+            for child in self.detail_rows.winfo_children():
+                child.destroy()
+            self.btn_reveal.config(state="disabled", command=None)
+            self.btn_copy.config(state="disabled", command=None)
+            return
+
+        self.detail_name.config(text=info.file_name)
+        self.badge_format.config(text=info.category.upper())
+        if info.exif_status == EXIF_OK:
+            self.badge_status.config(text="已读取", fg=GREEN)
+        elif info.exif_status == EXIF_ERROR:
+            self.badge_status.config(text="读取失败", fg=ORANGE)
+        elif info.exif_status == EXIF_NO_EXIF:
+            self.badge_status.config(text="无 EXIF", fg=TEXT_SUB)
+        else:
+            self.badge_status.config(text="未解析", fg=TEXT_SUB)
+        self.detail_meta.config(text=f"{format_size(info.size_bytes)} · 修改于 {info.modified_at or '—'}")
+
+        for child in self.detail_rows.winfo_children():
+            child.destroy()
+        rows = []
+        for label, getter in _DETAIL_FIELDS:
+            value = getter(info)
+            rows.append((label, value))
+        if info.exif_status == EXIF_ERROR:
+            rows.append(("错误信息", info.exif_error))
+        for label, value in rows:
+            row = tk.Frame(self.detail_rows, bg=PANEL_BG)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=label, bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9)).pack(side="left")
+            tk.Label(
+                row, text=value if value else "—", bg=PANEL_BG, fg=TEXT if value else TEXT_FAINT,
+                font=self._font(9), anchor="e",
+            ).pack(side="right")
+
+        path = info.path
+        self.btn_reveal.config(
+            state="normal" if path.exists() else "disabled",
+            command=self.reveal_selected,
+        )
+        self.btn_copy.config(state="normal", command=self.copy_selected_path)
+
+    # ------------------------------------------------------------------ #
+    # 底部状态栏
+    # ------------------------------------------------------------------ #
+
+    def _build_status_bar(self) -> None:
+        bar = tk.Frame(self.root, bg=PANEL_BG, height=40)
+        bar.pack(fill="x", side="bottom")
+        bar.pack_propagate(False)
+        self.status_left = tk.Label(bar, text="", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9))
+        self.status_left.pack(side="left", padx=16)
+        self.status_right = tk.Label(
+            bar, text=f"数据库 {self.db_path}", bg=PANEL_BG, fg=TEXT_FAINT, font=("Consolas", 8)
+        )
+        self.status_right.pack(side="right", padx=16)
+
+    def refresh_status_bar(self) -> None:
+        total = self.db.count_photos()
+        err = self.db.count_by_exif_status().get(EXIF_ERROR, 0)
+        folders = self.db.list_folders()
+        last_scan = max((f.last_scanned_at for f in folders if f.last_scanned_at), default=None)
+        parts = []
+        if last_scan:
+            parts.append(f"上次扫描 {last_scan}")
+        parts.append(f"库中总文件 {total:,}")
+        parts.append(f"成功 {total - err:,}")
+        parts.append(f"异常 {err:,}")
+        self.status_left.config(text=" · ".join(parts))
+
+    # ------------------------------------------------------------------ #
+    # 文件夹库
+    # ------------------------------------------------------------------ #
+
+    def refresh_library(self) -> None:
+        self.library_tree.delete(*self.library_tree.get_children())
+        for folder in self.db.list_folders():
+            key = str(folder.path)
+            mark = "☑" if key in self.checked_folders else "☐"
+            count = f"{folder.photo_count:,}"
+            scan_note = f" · 扫描于 {folder.last_scanned_at}" if folder.last_scanned_at else ""
+            self.library_tree.insert("", "end", iid=key, text=f"{mark}  {folder.path}", values=(f"{count} 张{scan_note}",))
+
+    def _on_library_click(self, event) -> None:
+        iid = self.library_tree.identify_row(event.y)
+        if not iid:
+            return
+        if str(iid) in self.checked_folders:
+            self.checked_folders.discard(str(iid))
+        else:
+            self.checked_folders.add(str(iid))
+        self.refresh_library()
+        self.refresh_results()
+
+    def add_folder_dialog(self) -> None:
+        chosen = filedialog.askdirectory(title="选择要加入文件夹库的文件夹", initialdir=self.folder_var.get() or str(PROJECT_ROOT))
+        if not chosen:
+            return
+        self.db.add_folder(chosen)
+        self.checked_folders.add(str(Path(chosen).resolve()))
+        self.folder_var.set(str(Path(chosen).resolve()))
+        self.refresh_library()
+        self.refresh_results()
+        self.refresh_status_bar()
+
+    def remove_selected_folder(self) -> None:
+        selection = self.library_tree.selection()
+        if not selection:
+            messagebox.showinfo("移除文件夹", "请先在文件夹库中选择一个文件夹。")
+            return
+        folder = selection[0]
+        if not messagebox.askyesno(
+            "移除文件夹",
+            "只从文件夹库移除该条目，不删除照片记录，更不会删除原片。\n\n继续移除？\n" + folder,
+        ):
+            return
+        self.db.remove_folder(folder)
+        self.checked_folders.discard(folder)
+        self.refresh_library()
+        self.refresh_results()
+        self.refresh_status_bar()
+
+    # ------------------------------------------------------------------ #
+    # 结果列表与详情联动
+    # ------------------------------------------------------------------ #
+
+    def refresh_results(self) -> None:
+        folders = sorted(self.checked_folders) or [f.path for f in self.db.list_folders()]
+        photos = self.db.find_photos_under(folders)
+        self.infos_by_iid = {str(info.path): info for info in photos}
+
+        self.result_tree.delete(*self.result_tree.get_children())
+        for info in photos:
+            iid = str(info.path)
+            shutter = format_shutter(info.exposure_time_s) if info.exposure_time_s else ""
+            values = (
+                info.file_name,
+                _category_label(info.category),
+                info.taken_at or "",
+                info.camera or "",
+                str(info.iso) if info.iso is not None else "",
+                shutter,
+                format_size(info.size_bytes),
+            )
+            tags = []
+            if info.exif_status == EXIF_ERROR:
+                tags.append("error")
+            elif info.category in ("video", "unsupported"):
+                tags.append("dim")
+            self.result_tree.insert("", "end", iid=iid, values=values, tags=tags)
+
+        total = self.db.count_photos()
+        self.count_label.config(text=f"库中共 {total:,} 个文件 · 当前显示 {len(photos):,} 张")
+        if self.current is not None:
+            keep = self.infos_by_iid.get(str(self.current.path))
+            self.set_detail(keep)
+
+    @staticmethod
+    def _select_target() -> PhotoInfo | None:
+        return None
+
+    def _on_result_select(self, _event=None) -> None:
+        selection = self.result_tree.selection()
+        if not selection:
+            return
+        info = self.infos_by_iid.get(selection[0])
+        if info is not None:
+            self.set_detail(info)
+
+    def reveal_selected(self) -> None:
+        if self.current is None:
+            return
+        target = self.current.path
+        subprocess.Popen(["explorer", f'/select,"{target}"'])
+
+    def copy_selected_path(self) -> None:
+        if self.current is None:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(str(self.current.path))
+        self.status_left.config(text=f"已复制路径：{self.current.path}")
+
+    # ------------------------------------------------------------------ #
+    # 扫描流程（后台线程 + 队列轮询）
+    # ------------------------------------------------------------------ #
+
+    def start_scan(self) -> None:
+        if self.scan_thread and self.scan_thread.is_alive():
+            return
+        folders = [f.path for f in self.db.list_folders() if str(f.path) in self.checked_folders]
+        if not folders:
+            messagebox.showinfo("开始扫描", "请先在左侧文件夹库勾选至少一个要扫描的文件夹。")
+            return
+
+        self.cancel_event.clear()
+        self._set_scanning_ui(True)
+        self.scan_thread = threading.Thread(
+            target=self._scan_worker, args=(folders,), daemon=True
+        )
+        self.scan_thread.start()
+        self.root.after(100, self._poll_scan_queue)
+
+    def cancel_scan(self) -> None:
+        self.cancel_event.set()
+        self.progress_current.config(text="正在取消……（等待当前文件处理完成）")
+
+    def _set_scanning_ui(self, scanning: bool) -> None:
+        if scanning:
+            self.result_frame.pack_forget()
+            self.progress_frame.pack(fill="both", expand=True)
+            self.progress_bar.config(value=0)
+            self.progress_title.config(text="正在扫描")
+            self.progress_folder.config(text="")
+            self.progress_detail.config(text="")
+            self.progress_current.config(text="")
+            self.btn_scan.config(text="扫描中…", state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
+            for btn in (self.btn_browse, self.btn_add, self.btn_remove):
+                btn.config(state="disabled")
+        else:
+            self.progress_frame.pack_forget()
+            self.result_frame.pack(fill="both", expand=True)
+            self.btn_scan.config(text="开始扫描", state="normal", bg=ACCENT, fg="#ffffff")
+            for btn in (self.btn_browse, self.btn_add, self.btn_remove):
+                btn.config(state="normal")
+
+    def _scan_worker(self, folders) -> None:  # 在后台线程中运行
+        for index, folder in enumerate(folders, start=1):
+            if self.cancel_event.is_set():
+                break
+            self.msg_queue.put(("folder", index, len(folders), folder))
+            result = scan_folder(folder)
+            infos: list[PhotoInfo] = []
+            n = len(result.files)
+            for done, item in enumerate(result.files, start=1):
+                if self.cancel_event.is_set():
+                    break
+                infos.append(read_photo_info(item.path, item.category))
+                if done % 5 == 0 or done == n:
+                    self.msg_queue.put(("progress", done, n, item.path.name))
+            if infos:
+                self.db.upsert_many(infos)
+            if not self.cancel_event.is_set():
+                self.db.mark_folder_scanned(folder)
+        self.msg_queue.put(("done",))
+
+    def _poll_scan_queue(self) -> None:
+        try:
+            while True:
+                msg = self.msg_queue.get_nowait()
+                kind = msg[0]
+                if kind == "folder":
+                    _, index, total, folder = msg
+                    self.progress_title.config(text=f"正在扫描（文件夹 {index} / {total}）")
+                    self.progress_folder.config(text=str(folder))
+                    self.progress_bar.config(value=0)
+                    self.progress_detail.config(text="")
+                elif kind == "progress":
+                    _, done, n, name = msg
+                    percent = done * 100.0 / max(n, 1)
+                    self.progress_bar.config(value=percent)
+                    self.progress_detail.config(text=f"{done:,} / {n:,} · {percent:.0f}%")
+                    self.progress_current.config(text=f"当前文件：{name}")
+                elif kind == "done":
+                    cancelled = self.cancel_event.is_set()
+                    self._set_scanning_ui(False)
+                    self.refresh_library()
+                    self.refresh_results()
+                    self.refresh_status_bar()
+                    if cancelled:
+                        self.status_left.config(text="扫描已取消（已处理的部分已写入数据库）")
+                    break
+        except queue.Empty:
+            pass
+        if self.scan_thread and self.scan_thread.is_alive():
+            self.root.after(100, self._poll_scan_queue)
+
+    # ------------------------------------------------------------------ #
+    # 生命周期
+    # ------------------------------------------------------------------ #
+
+    def _on_close(self) -> None:
+        self.cancel_event.set()
+        try:
+            self.db.close()
+        finally:
+            self.root.destroy()
+
+
+def _category_label(category: str) -> str:
+    return {"nef": "NEF", "jpeg": "JPEG", "png": "PNG", "video": "视频", "unsupported": "其他"}.get(
+        category, category
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """GUI 入口。``--selftest`` 仅构建窗口后立即退出（供自动化验证）。"""
+    args = list(sys.argv[1:] if argv is None else argv)
+    root = tk.Tk()
+    try:
+        if "--selftest" in args:
+            root.withdraw()
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as tmp:
+                app = PhotoClassifierApp(root, Path(tmp) / "selftest.db")
+                root.update_idletasks()
+                root.update()
+                app.db.close()  # 关闭数据库，允许临时目录被清理
+            root.destroy()
+            print("GUI selftest OK")
+            return 0
+        PhotoClassifierApp(root)
+        root.mainloop()
+        return 0
+    except Exception:
+        root.destroy()
+        raise
+
+
+if __name__ == "__main__":
+    sys.exit(main())

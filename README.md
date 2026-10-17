@@ -77,6 +77,20 @@ post-processing software.
     path);
   - `stats`: database statistics (by file type / EXIF status / camera / lens).
 
+### GUI Shell (GUI V1.5) ✅
+
+- **Folder library**: import multiple folders, tick the ones to scan, scan
+  them one after another;
+- **Background scanning**: progress bar + current file + live success/error
+  counts, cancellable at any time;
+- **Results list**: file name, type, capture time, camera, ISO, shutter, size;
+- **Detail panel**: full photo information (same fields as the database) +
+  `Reveal in Explorer` and `Copy Path`;
+- **Placeholders**: tag filtering (V3), parameter conditions (V4), export /
+  import to Lightroom (V5) are drawn but disabled until their versions land;
+- Launch: the desktop shortcut (pointing at `run_gui.pyw`), or
+  `python -m src.gui` / `pythonw run_gui.pyw`.
+
 ## Installation & Usage
 
 Requirements: Python 3.12+ (standard library only, no third-party
@@ -149,9 +163,10 @@ DSC_0001.NEF  [NEF]
 python -m pytest
 ```
 
-The suite contains 92 tests, all based on temporary files synthesized to the
+The suite contains 101 tests, all based on temporary files synthesized to the
 TIFF / EXIF / PNG specifications (see `tests/exif_maker.py`) — no real photos
-are needed and no local files are touched.
+are needed and no local files are touched. The GUI tests build the real window
+off-screen without entering the main loop.
 
 ## Project Structure
 
@@ -161,15 +176,19 @@ PhotoClassifier/
 │   ├── scanner.py       # V1: read-only folder scanner (type detection, fault tolerance)
 │   ├── photo_info.py    # V1.5: photo info data structure (file info + EXIF fields)
 │   ├── exif_reader.py   # V1.5: zero-dependency EXIF parser (NEF/JPEG/PNG)
-│   ├── database.py      # V1.5: SQLite photo information database
-│   └── main.py          # V1.5: CLI entry point (scan / show / stats)
+│   ├── database.py      # V1.5: SQLite photo information database (incl. folder library)
+│   ├── main.py          # V1.5: CLI entry point (scan / show / stats)
+│   └── gui.py           # GUI V1.5: graphical shell (Tkinter)
 ├── tests/
 │   ├── test_scanner.py      # V1 scanner tests
 │   ├── test_exif_reader.py  # EXIF parsing tests (incl. corrupted-file tolerance)
 │   ├── test_database.py     # database read/write tests
 │   ├── test_main.py         # CLI & end-to-end integration tests
+│   ├── test_gui.py          # GUI shell tests
 │   └── exif_maker.py        # helper to synthesize NEF/JPEG/PNG test files
+├── assets/              # application icon
 ├── data/                # local data directory (gitignored; database default location)
+├── run_gui.pyw          # GUI launcher (target of the desktop shortcut)
 ├── pytest.ini
 ├── README.md            # this file (English)
 └── README.zh-CN.md      # Chinese README
@@ -197,7 +216,7 @@ PhotoClassifier/
 | V3.5 | Visual recognition (compare traditional CV / local models / AI APIs) | Planned |
 | V4 | Smart filtering (AND / OR combos of tags + EXIF conditions) | Planned |
 | V5 | Lightroom workflow (reveal in Explorer / batch paths / export to folder) | Planned |
-| V6 | GUI (pulled forward: design mockups done; PySide6 chosen) | 🎨 In design |
+| V6 | GUI (pulled forward: shell implemented — folder library, scan progress, detail panel; Tkinter for now, PySide6 to be evaluated when the environment allows) | 🔨 Shell implemented |
 
 Future extensions: more RAW formats (CR3 / ARW / RAF / DNG / ORF / RW2), map
 view, timeline, camera & lens statistics, similar-photo clustering, batch
