@@ -70,6 +70,22 @@ Lightroom 等后期软件。
 - 启动方式：桌面快捷方式（指向 `run_gui.pyw`），或
   `python -m src.gui` / `pythonw run_gui.pyw`。
 
+### V2：规则分类 ✅
+
+- **6 条内置 EXIF 规则**（阈值全部可配置，集中在 `src/rules.py` 的 `RuleConfig`）：
+  - 夜景：拍摄时间落在夜间时段（默认 18:00–06:00）
+  - 高感：ISO ≥ 3200；慢门：快门慢于 1/30s；长焦：焦距 ≥ 70mm
+  - 广角：焦距 ≤ 24mm；大光圈：光圈 ≤ f/2.8
+- **可解释**：每次命中都生成带实际数值的原因，如 `ISO 6400 ≥ 3200`、
+  `焦距 120 mm ≥ 70 mm`；
+- **EXIF 缺失不报错**：字段为空时规则不命中，照片仍保留在全部照片视图中；
+- **一张照片可以同时命中多条规则**（对应"一张照片、多个标签"的设计思想）；
+- **CLI**：`classify`（规则统计报告）+ `filter`（按规则筛选，支持 AND/OR、
+  `--explain` 展开原因、`--gps` 只看有 GPS 的照片）；
+- **GUI**：筛选面板的复选框已接入规则引擎，勾选后**实时筛选**结果列表；
+  结果列表新增「自动标签」列（chips）；详情面板显示「规则命中」原因；
+  支持「有 GPS 坐标」筛选。
+
 ## 安装与使用
 
 要求：Python 3.12+（仅标准库，无第三方依赖）。
@@ -87,6 +103,16 @@ python -m src.main show --match DSC_0012
 
 # 4. 查看统计
 python -m src.main stats
+
+# 5. 规则分类统计（V2）
+python -m src.main classify
+
+# 6. 按规则筛选（V2）：夜景 且 高感，展开命中原因
+python -m src.main filter --rules night,high_iso --explain
+
+# 7. 夜景 或 长焦；或只看有 GPS 的照片
+python -m src.main filter --rules night,telephoto --or
+python -m src.main filter --gps
 ```
 
 `scan` 的输出报告（对应规划文档的容错设计）：
@@ -136,7 +162,7 @@ DSC_0001.NEF  [NEF]
 python -m pytest
 ```
 
-测试共 101 个，全部使用按 TIFF / EXIF / PNG 规范合成的临时文件（见
+测试共 160 个，全部使用按 TIFF / EXIF / PNG 规范合成的临时文件（见
 `tests/exif_maker.py`），不依赖任何真实照片，也不会触碰本机文件；GUI 测试
 在后台构建真实窗口（不进入主循环、不弹窗）。
 
@@ -149,14 +175,17 @@ PhotoClassifier/
 │   ├── photo_info.py    # V1.5：照片信息数据结构（文件信息 + EXIF 字段）
 │   ├── exif_reader.py   # V1.5：零依赖 EXIF 解析器（NEF/JPEG/PNG）
 │   ├── database.py      # V1.5：SQLite 照片信息数据库（含文件夹库）
-│   ├── main.py          # V1.5：命令行入口（scan / show / stats）
-│   └── gui.py           # GUI V1.5：图形界面外壳（Tkinter）
+│   ├── rules.py         # V2：EXIF 规则分类引擎（6 条内置规则，可配置）
+│   ├── formatting.py    # 通用显示格式化（CLI / GUI / 规则共用）
+│   ├── main.py          # CLI 入口（scan / show / stats / classify / filter）
+│   └── gui.py           # GUI：图形界面外壳（Tkinter，含规则筛选）
 ├── tests/
 │   ├── test_scanner.py      # V1 扫描器测试
 │   ├── test_exif_reader.py  # EXIF 解析测试（含损坏文件容错）
 │   ├── test_database.py     # 数据库读写测试
+│   ├── test_rules.py        # 规则引擎测试（含边界与性能基线）
 │   ├── test_main.py         # CLI 与整体流程集成测试
-│   ├── test_gui.py          # GUI 外壳测试
+│   ├── test_gui.py          # GUI 外壳测试（含规则筛选）
 │   └── exif_maker.py        # 合成 NEF/JPEG/PNG 测试文件的辅助模块
 ├── assets/              # 应用图标
 ├── data/                # 本地数据目录（gitignore，数据库默认位置）
@@ -181,8 +210,8 @@ PhotoClassifier/
 | --- | --- | --- |
 | V0 | 项目基础（仓库、虚拟环境、目录结构、README） | ✅ 完成 |
 | V1 | 文件扫描与 NEF 基础支持（类型识别、容错、报告） | ✅ 完成 |
-| V1.5 | EXIF 与照片信息（解析器、数据库、CLI） | ✅ 完成（当前） |
-| V2 | 规则分类（夜景 / 高感 / 慢门 / 长焦 / 广角 / 按相机镜头等，不依赖 AI） | 计划中 |
+| V1.5 | EXIF 与照片信息（解析器、数据库、CLI） | ✅ 完成 |
+| V2 | 规则分类（夜景 / 高感 / 慢门 / 长焦 / 广角 / 大光圈；CLI + GUI 筛选） | ✅ 完成（当前） |
 | V2.5 | 图像质量分析（模糊 / 曝光异常 / 重复照片，仅提示不删除） | 计划中 |
 | V3 | 多标签系统（#夜景 #建筑 …，一张照片多个标签） | 计划中 |
 | V3.5 | 视觉识别（比较传统 CV / 本地模型 / AI API） | 计划中 |

@@ -2,8 +2,8 @@
 
 [English](v2-plan.md) | [简体中文](v2-plan.zh-CN.md)
 
-> Status: **plan finalized** (decisions D1–D5 confirmed, 2026-10-18) — no code
-> written yet; implementation proceeds milestone by milestone.
+> Status: **implemented** (2026-10-18; decisions D1–D5 all applied) — M1 rule
+> engine, M2 CLI, M3 GUI wiring and M4 docs are complete; 160 tests green.
 
 ## 1. Goal & Scope
 

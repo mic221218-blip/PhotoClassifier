@@ -122,3 +122,113 @@ def test_copy_path_puts_path_on_clipboard(root, db_path: Path) -> None:
 
     assert root.clipboard_get() == iid
     app.db.close()
+
+
+# --------------------------------------------------------------------------- #
+# 规则筛选（V2）
+# --------------------------------------------------------------------------- #
+
+
+def seed_rule_rows(app) -> None:
+    """A=夜景+高感，B=只有夜景，C=只有高感。"""
+    app.db.upsert_many(
+        [
+            make_info(
+                Path("D:/Photos/2026/a.NEF"),
+                taken_at="2026-09-18 20:15:32",
+                iso=6400,
+            ),
+            make_info(
+                Path("D:/Photos/2026/b.NEF"),
+                taken_at="2026-09-18 21:00:00",
+                iso=200,
+            ),
+            make_info(
+                Path("D:/Photos/2026/c.NEF"),
+                taken_at="2026-09-18 12:00:00",
+                iso=6400,
+            ),
+        ]
+    )
+    app.checked_folders.add(str(Path("D:/Photos/2026").resolve()))
+    app.refresh_library()
+    app.refresh_results()
+
+
+def row_names(app) -> set[str]:
+    return {app.result_tree.item(iid, "values")[0] for iid in app.result_tree.get_children()}
+
+
+def test_rule_filter_and_mode(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+    assert row_names(app) == {"a.NEF", "b.NEF", "c.NEF"}
+
+    app.rule_vars["night"].set(True)
+    app._on_filter_changed()
+    assert row_names(app) == {"a.NEF", "b.NEF"}
+
+    app.rule_vars["high_iso"].set(True)  # AND：夜景 且 高感
+    app._on_filter_changed()
+    assert row_names(app) == {"a.NEF"}
+
+    app.db.close()
+
+
+def test_rule_filter_or_mode(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+
+    app.rule_vars["night"].set(True)
+    app.rule_vars["high_iso"].set(True)
+    app.and_mode.set(False)  # OR：夜景 或 高感
+    app._on_filter_changed()
+
+    assert row_names(app) == {"a.NEF", "b.NEF", "c.NEF"}
+    app.db.close()
+
+
+def test_clear_filters_restores_all_rows(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+
+    app.rule_vars["night"].set(True)
+    app._on_filter_changed()
+    assert row_names(app) == {"a.NEF", "b.NEF"}
+
+    app.clear_filters()
+    assert row_names(app) == {"a.NEF", "b.NEF", "c.NEF"}
+    app.db.close()
+
+
+def test_chips_column_shows_rule_labels(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+
+    row_values = {
+        app.result_tree.item(iid, "values")[0]: app.result_tree.item(iid, "values")[6]
+        for iid in app.result_tree.get_children()
+    }
+    assert "夜景" in row_values["a.NEF"]
+    assert "高感" in row_values["a.NEF"]
+    assert "夜景" in row_values["b.NEF"] and "高感" not in row_values["b.NEF"]
+    assert "高感" in row_values["c.NEF"] and "夜景" not in row_values["c.NEF"]
+    app.db.close()
+
+
+def test_detail_panel_shows_rule_reasons(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+
+    iid = str(Path("D:/Photos/2026/a.NEF").resolve())
+    app.result_tree.selection_set(iid)
+    app._on_result_select()
+    root.update()
+
+    texts = []
+    for row_frame in app.rules_frame.winfo_children():
+        for label in row_frame.winfo_children():
+            texts.append(label.cget("text"))
+    assert any("夜景" in text for text in texts)
+    assert any("ISO 6400 ≥ 3200" in text for text in texts)
+    app.db.close()

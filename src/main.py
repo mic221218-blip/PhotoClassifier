@@ -23,6 +23,7 @@ from pathlib import Path
 
 from src.database import PhotoDatabase
 from src.exif_reader import read_photo_info
+from src.formatting import format_shutter, format_size
 from src.photo_info import (
     EXIF_ERROR,
     EXIF_NO_EXIF,
@@ -30,6 +31,7 @@ from src.photo_info import (
     EXIF_SKIPPED,
     PhotoInfo,
 )
+from src.rules import RuleEngine, RuleMatch
 from src.scanner import (
     CATEGORY_JPEG,
     CATEGORY_NEF,
@@ -103,29 +105,6 @@ def run_scan(root: str | Path, db_path: str | Path = DEFAULT_DB) -> ScanOutcome:
 # --------------------------------------------------------------------------- #
 # 显示格式化
 # --------------------------------------------------------------------------- #
-
-
-def format_size(size_bytes: int) -> str:
-    """字节数 → 人类可读（如 "45.2 MB"）。"""
-    size = float(size_bytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            if unit == "B":
-                return f"{int(size)} {unit}"
-            return f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} TB"
-
-
-def format_shutter(seconds: float) -> str:
-    """快门秒数 → "1/250s" / "2s"。"""
-    if seconds >= 1:
-        text = f"{seconds:g}"
-        return f"{text}s"
-    denominator = round(1 / seconds) if seconds > 0 else 0
-    if denominator > 0 and abs(1 / denominator - seconds) <= seconds * 0.05:
-        return f"1/{denominator}s"
-    return f"{seconds:g}s"
 
 
 def _strip_zero(value: float) -> str:
@@ -292,6 +271,90 @@ def format_stats(db_path: str | Path) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# 规则分类（V2）
+# --------------------------------------------------------------------------- #
+
+
+def format_classify_report(db_path: str | Path) -> str:
+    """按规则统计数据库中的照片，并给出少量匹配示例（可解释）。"""
+    engine = RuleEngine()
+    labels = engine.labels()
+    counts = {rule_id: 0 for rule_id in engine.rule_ids}
+    examples = {rule_id: [] for rule_id in engine.rule_ids}
+    total = 0
+
+    with PhotoDatabase.open(db_path) as database:
+        photos = list(database.iter_photos())
+
+    total = len(photos)
+    for info in photos:
+        for match in engine.evaluate(info):
+            counts[match.rule_id] += 1
+            if len(examples[match.rule_id]) < 3:
+                examples[match.rule_id].append((info, match))
+
+    lines = [f"规则分类完成（共 {total:,} 张）"]
+    for rule_id in engine.rule_ids:
+        zh, en = labels[rule_id]
+        label = f"{zh}  {en}"
+        lines.append(f"  {label}：{counts[rule_id]:,} 张（{engine.describe(rule_id)}）")
+    if any(examples.values()):
+        lines.append("示例 / examples:")
+        for rule_id in engine.rule_ids:
+            for info, match in examples[rule_id]:
+                lines.append(f"  {info.file_name}  {match.label}：{match.reason}")
+    return "\n".join(lines)
+
+
+def _parse_rule_ids(raw: str, engine: RuleEngine) -> list[str]:
+    """解析 --rules 参数（逗号分隔），未知规则给出可读错误。"""
+    requested = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    if not requested:
+        raise SystemExit("filter: --rules 不能为空，可用规则：" + ", ".join(engine.rule_ids))
+    unknown = [rule_id for rule_id in requested if rule_id not in engine.rule_ids]
+    if unknown:
+        raise SystemExit(
+            f"filter: 未知规则 {', '.join(unknown)}；可用规则：" + ", ".join(engine.rule_ids)
+        )
+    return requested
+
+
+def run_filter(
+    db_path: str | Path,
+    rule_ids: list[str] | None,
+    *,
+    use_and: bool = True,
+    gps_only: bool = False,
+    limit: int = 0,
+) -> list[tuple[PhotoInfo, list[RuleMatch]]]:
+    """按规则筛选照片，返回 (照片, 命中列表) 的列表。"""
+    engine = RuleEngine()
+    matched: list[tuple[PhotoInfo, list[RuleMatch]]] = []
+
+    with PhotoDatabase.open(db_path) as database:
+        photos = list(database.iter_photos())
+
+    for info in photos:
+        if gps_only and not info.has_gps:
+            continue
+        matches = engine.evaluate(info)
+        if rule_ids:
+            hit_ids = {match.rule_id for match in matches}
+            selected = set(rule_ids)
+            ok = selected.issubset(hit_ids) if use_and else bool(selected & hit_ids)
+            if not ok:
+                continue
+        elif not gps_only:
+            # 既没有规则也没有 GPS 条件：调用方应提前报错，这里防御性返回空
+            return []
+        matched.append((info, matches))
+
+    if limit > 0:
+        matched = matched[:limit]
+    return matched
+
+
+# --------------------------------------------------------------------------- #
 # 命令行
 # --------------------------------------------------------------------------- #
 
@@ -316,6 +379,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     stats_parser = subparsers.add_parser("stats", help="查看数据库统计")
     stats_parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
+
+    classify_parser = subparsers.add_parser(
+        "classify", help="按 EXIF 规则分类并统计（夜景 / 高感 / 慢门 / 长焦 / 广角 / 大光圈）"
+    )
+    classify_parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
+
+    filter_parser = subparsers.add_parser("filter", help="按规则筛选照片（输出匹配文件）")
+    filter_parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
+    filter_parser.add_argument(
+        "--rules", default="", help="逗号分隔的规则，如 night,high_iso（见 classify）"
+    )
+    filter_parser.add_argument(
+        "--or", dest="or_", action="store_true", help="规则之间用 OR（默认 AND）"
+    )
+    filter_parser.add_argument("--gps", action="store_true", help="只看有 GPS 坐标的照片")
+    filter_parser.add_argument("--limit", type=int, default=0, help="最多输出多少条（0 = 全部）")
+    filter_parser.add_argument("--explain", action="store_true", help="输出命中原因")
 
     return parser
 
@@ -355,6 +435,39 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "stats":
         print(format_stats(args.db))
+        return 0
+
+    if args.command == "classify":
+        print(format_classify_report(args.db))
+        return 0
+
+    if args.command == "filter":
+        if not args.rules and not args.gps:
+            print("filter: 请至少指定 --rules 或 --gps（可用规则见 classify 输出）")
+            return 2
+        engine = RuleEngine()
+        rule_ids = _parse_rule_ids(args.rules, engine) if args.rules else None
+        matched = run_filter(
+            args.db,
+            rule_ids,
+            use_and=not args.or_,
+            gps_only=args.gps,
+            limit=args.limit,
+        )
+        if not matched:
+            print("（没有匹配的照片）")
+            return 1
+        for info, matches in matched:
+            if args.explain:
+                reasons = "；".join(
+                    f"{match.label}：{match.reason}"
+                    for match in matches
+                    if rule_ids is None or match.rule_id in rule_ids
+                )
+                print(f"{info.file_name}  [{info.category.upper()}]  {reasons}")
+            else:
+                print(str(info.path))
+        print(f"（共 {len(matched):,} 张）")
         return 0
 
     parser.error(f"未知命令：{args.command}")

@@ -30,8 +30,9 @@ from tkinter import font as tkfont
 
 from src.database import PhotoDatabase
 from src.exif_reader import read_photo_info
-from src.main import format_shutter, format_size
+from src.formatting import format_shutter, format_size
 from src.photo_info import EXIF_ERROR, EXIF_NO_EXIF, EXIF_OK, PhotoInfo
+from src.rules import RULE_REGISTRY, RuleEngine, RuleMatch
 from src.scanner import scan_folder
 
 #: 项目根目录（src/ 的上一级）。数据库默认位置与其解耦于当前工作目录。
@@ -59,12 +60,13 @@ TEXT_FAINT = "#6e717e"
 
 #: 结果列表的列定义：(键, 标题, 宽度, 锚)
 _RESULT_COLUMNS = [
-    ("name", "文件名", 210, "w"),
-    ("category", "类型", 70, "w"),
+    ("name", "文件名", 200, "w"),
+    ("category", "类型", 60, "w"),
     ("taken_at", "拍摄时间", 150, "w"),
-    ("camera", "相机", 140, "w"),
-    ("iso", "ISO", 70, "e"),
-    ("shutter", "快门", 90, "e"),
+    ("camera", "相机", 130, "w"),
+    ("iso", "ISO", 60, "e"),
+    ("shutter", "快门", 85, "e"),
+    ("rules", "自动标签", 150, "w"),
     ("size", "大小", 90, "e"),
 ]
 
@@ -117,10 +119,17 @@ class PhotoClassifierApp:
 
         self.checked_folders: set[str] = set()
         self.infos_by_iid: dict[str, PhotoInfo] = {}
+        self.matches_by_iid: dict[str, list[RuleMatch]] = {}
         self.current: PhotoInfo | None = None
         self.scan_thread: threading.Thread | None = None
         self.cancel_event = threading.Event()
         self.msg_queue: queue.Queue = queue.Queue()
+
+        self.rule_engine = RuleEngine()
+        self.active_rules: set[str] = set()
+        self.and_mode = tk.BooleanVar(value=True)
+        self.gps_only = tk.BooleanVar(value=False)
+        self.rule_vars: dict[str, tk.BooleanVar] = {}
 
         self._setup_window()
         self._build_styles()
@@ -270,37 +279,81 @@ class PhotoClassifierApp:
             anchor="w", padx=16, pady=(0, 2)
         )
         tk.Label(
-            panel, text="占位：标签 V3 · 参数条件 V4 接入后可用", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
-        ).pack(anchor="w", padx=16, pady=(0, 8))
+            panel, text="自动标签（EXIF 规则）· 勾选后实时筛选", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
+        ).pack(anchor="w", padx=16, pady=(0, 6))
 
-        tags = tk.Frame(panel, bg=PANEL_BG)
-        tags.pack(fill="x", padx=16)
-        for i, (label, checked) in enumerate(
-            [("夜景", True), ("建筑", True), ("天空", False), ("人物", False)]
-        ):
+        rules = tk.Frame(panel, bg=PANEL_BG)
+        rules.pack(fill="x", padx=12)
+        rule_entries = [(rule_id, zh) for rule_id, zh, _en, _fn in RULE_REGISTRY]
+        for i, (rule_id, label) in enumerate(rule_entries):
+            var = tk.BooleanVar(value=False)
+            self.rule_vars[rule_id] = var
             tk.Checkbutton(
-                tags,
+                rules,
                 text=label,
+                variable=var,
+                command=self._on_filter_changed,
+                bg=PANEL_BG,
+                fg=TEXT,
+                activebackground=PANEL_BG,
+                activeforeground=TEXT,
+                selectcolor=INPUT_BG,
+                font=self._font(9),
+            ).grid(row=i // 2, column=i % 2, sticky="w", pady=1, padx=(0, 6))
+
+        gps_row = tk.Frame(panel, bg=PANEL_BG)
+        gps_row.pack(fill="x", padx=16, pady=(2, 0))
+        tk.Checkbutton(
+            gps_row,
+            text="只看有 GPS 坐标的照片",
+            variable=self.gps_only,
+            command=self._on_filter_changed,
+            bg=PANEL_BG,
+            fg=TEXT_SUB,
+            activebackground=PANEL_BG,
+            activeforeground=TEXT_SUB,
+            selectcolor=INPUT_BG,
+            font=self._font(9),
+        ).pack(anchor="w")
+
+        logic_row = tk.Frame(panel, bg=PANEL_BG)
+        logic_row.pack(fill="x", padx=16, pady=(8, 0))
+        tk.Label(logic_row, text="条件组合", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9)).pack(anchor="w")
+        radios = tk.Frame(logic_row, bg=PANEL_BG)
+        radios.pack(anchor="w", pady=(2, 0))
+        for text, value in (("并且 AND", True), ("或者 OR", False)):
+            tk.Radiobutton(
+                radios,
+                text=text,
+                value=value,
+                variable=self.and_mode,
+                command=self._on_filter_changed,
                 bg=PANEL_BG,
                 fg=TEXT_SUB,
-                disabledforeground=TEXT_SUB,
+                activebackground=PANEL_BG,
+                activeforeground=TEXT_SUB,
                 selectcolor=INPUT_BG,
-                state="disabled",
-            ).grid(row=i // 2, column=i % 2, sticky="w", pady=2)
+                font=self._font(9),
+            ).pack(anchor="w")
 
+        self.btn_clear = self._button(panel, "清除筛选", self.clear_filters)
+        self.btn_clear.pack(fill="x", padx=16, pady=(10, 2), ipady=2)
+
+        tk.Frame(panel, bg=BORDER_SOFT, height=1).pack(fill="x", padx=12, pady=8)
+
+        tk.Label(panel, text="拍摄参数（V4 接入）", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)).pack(
+            anchor="w", padx=16, pady=(0, 4)
+        )
         params = tk.Frame(panel, bg=PANEL_BG)
-        params.pack(fill="x", padx=16, pady=(10, 0))
+        params.pack(fill="x", padx=16)
         for i, label in enumerate(("ISO ≥", "焦距 ≥", "快门 ≤")):
             tk.Label(params, text=label, bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9)).grid(
-                row=i, column=0, sticky="w", pady=3
+                row=i, column=0, sticky="w", pady=2
             )
             tk.Entry(
                 params, bg=INPUT_BG, fg=TEXT_FAINT, relief="flat", width=12, state="disabled",
                 disabledbackground=INPUT_BG, disabledforeground=TEXT_FAINT, font=self._font(9),
-            ).grid(row=i, column=1, sticky="w", padx=(12, 0), pady=3, ipady=3)
-
-        self.btn_filter = self._button(panel, "应用筛选", None, primary=True, disabled=True)
-        self.btn_filter.pack(fill="x", padx=16, pady=(16, 10), ipady=2)
+            ).grid(row=i, column=1, sticky="w", padx=(12, 0), pady=2, ipady=3)
 
     # ------------------------------------------------------------------ #
     # 中部：结果列表 + 扫描进度
@@ -380,6 +433,13 @@ class PhotoClassifierApp:
         self.detail_rows = tk.Frame(panel, bg=PANEL_BG)
         self.detail_rows.pack(fill="x", padx=18, pady=(8, 0))
 
+        # 规则命中（V2）：自动标签与原因
+        tk.Label(panel, text="规则命中", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(8, bold=True)).pack(
+            anchor="w", padx=18, pady=(8, 2)
+        )
+        self.rules_frame = tk.Frame(panel, bg=PANEL_BG)
+        self.rules_frame.pack(fill="x", padx=18)
+
         tk.Frame(panel, bg=BORDER_SOFT, height=1).pack(fill="x", padx=18, pady=(8, 10))
         actions = tk.Frame(panel, bg=PANEL_BG)
         actions.pack(fill="x", padx=18)
@@ -417,6 +477,8 @@ class PhotoClassifierApp:
         """刷新右侧详情面板。"""
         self.current = info
         self._draw_preview(info)
+        for child in self.rules_frame.winfo_children():
+            child.destroy()
         if info is None:
             self.detail_name.config(text="未选择照片")
             self.badge_format.config(text="")
@@ -424,6 +486,9 @@ class PhotoClassifierApp:
             self.detail_meta.config(text="")
             for child in self.detail_rows.winfo_children():
                 child.destroy()
+            tk.Label(
+                self.rules_frame, text="未命中任何规则", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
+            ).pack(anchor="w")
             self.btn_reveal.config(state="disabled", command=None)
             self.btn_copy.config(state="disabled", command=None)
             return
@@ -463,6 +528,28 @@ class PhotoClassifierApp:
             command=self.reveal_selected,
         )
         self.btn_copy.config(state="normal", command=self.copy_selected_path)
+
+        # 规则命中原因（V2）
+        matches = self.rule_engine.evaluate(info)
+        if not matches:
+            tk.Label(
+                self.rules_frame, text="未命中任何规则", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
+            ).pack(anchor="w")
+        for match in matches:
+            row = tk.Frame(self.rules_frame, bg=PANEL_BG)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=f"{match.label}：", bg=PANEL_BG, fg=ACCENT, font=self._font(8, bold=True)).pack(
+                side="left", anchor="n"
+            )
+            tk.Label(
+                row,
+                text=match.reason,
+                bg=PANEL_BG,
+                fg=TEXT_SUB,
+                font=self._font(8),
+                wraplength=270,
+                justify="left",
+            ).pack(side="left", anchor="w")
 
     # ------------------------------------------------------------------ #
     # 底部状态栏
@@ -552,11 +639,18 @@ class PhotoClassifierApp:
         folders = sorted(self.checked_folders) or [f.path for f in self.db.list_folders()]
         photos = self.db.find_photos_under(folders)
         self.infos_by_iid = {str(info.path): info for info in photos}
+        self.matches_by_iid = {}
 
         self.result_tree.delete(*self.result_tree.get_children())
+        visible = 0
         for info in photos:
+            matches = self.rule_engine.evaluate(info)
+            if not self._passes_filter(info, matches):
+                continue
             iid = str(info.path)
+            self.matches_by_iid[iid] = matches
             shutter = format_shutter(info.exposure_time_s) if info.exposure_time_s else ""
+            labels = " · ".join(match.label for match in matches)
             values = (
                 info.file_name,
                 _category_label(info.category),
@@ -564,6 +658,7 @@ class PhotoClassifierApp:
                 info.camera or "",
                 str(info.iso) if info.iso is not None else "",
                 shutter,
+                labels,
                 format_size(info.size_bytes),
             )
             tags = []
@@ -572,12 +667,45 @@ class PhotoClassifierApp:
             elif info.category in ("video", "unsupported"):
                 tags.append("dim")
             self.result_tree.insert("", "end", iid=iid, values=values, tags=tags)
+            visible += 1
 
         total = self.db.count_photos()
-        self.count_label.config(text=f"库中共 {total:,} 个文件 · 当前显示 {len(photos):,} 张")
+        filter_note = ""
+        if self.active_rules or self.gps_only.get():
+            filter_note = " · 已筛选"
+        self.count_label.config(
+            text=f"库中共 {total:,} 个文件 · 当前显示 {visible:,} 张{filter_note}"
+        )
         if self.current is not None:
             keep = self.infos_by_iid.get(str(self.current.path))
-            self.set_detail(keep)
+            if keep is not None and str(keep.path) in self.matches_by_iid:
+                self.set_detail(keep)
+
+    def _passes_filter(self, info: PhotoInfo, matches: list[RuleMatch]) -> bool:
+        """当前筛选条件是否接受这张照片。"""
+        if self.gps_only.get() and not info.has_gps:
+            return False
+        if self.active_rules:
+            hit = {match.rule_id for match in matches}
+            if self.and_mode.get():
+                return self.active_rules.issubset(hit)
+            return bool(self.active_rules & hit)
+        return True
+
+    def _on_filter_changed(self) -> None:
+        self.active_rules = {
+            rule_id
+            for rule_id, var in self.rule_vars.items()
+            if var.get()
+        }
+        self.refresh_results()
+
+    def clear_filters(self) -> None:
+        for var in self.rule_vars.values():
+            var.set(False)
+        self.gps_only.set(False)
+        self.active_rules = set()
+        self.refresh_results()
 
     @staticmethod
     def _select_target() -> PhotoInfo | None:

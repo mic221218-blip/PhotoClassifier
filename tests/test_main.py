@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pytest
 
+from src.database import PhotoDatabase
 from src.main import (
+    format_classify_report,
     format_report,
     format_shutter,
     format_size,
@@ -20,6 +22,7 @@ from src.main import (
     run_scan,
 )
 from src.photo_info import EXIF_ERROR, EXIF_NO_EXIF, EXIF_OK, EXIF_SKIPPED
+from src.rules import RuleEngine
 
 from exif_maker import (
     build_jpeg_without_exif,
@@ -27,6 +30,7 @@ from exif_maker import (
     nikon_z6iii_jpeg,
     nikon_z6iii_nef,
 )
+from test_database import make_info
 
 
 def make_file(root: Path, relative: str, content: bytes) -> Path:
@@ -282,3 +286,131 @@ def test_format_stats_on_empty_database(tmp_path: Path) -> None:
 
     assert "记录总数：0" in output
     assert "数据库：" in output
+
+
+# --------------------------------------------------------------------------- #
+# 5. 规则分类 CLI（V2）：classify / filter
+# --------------------------------------------------------------------------- #
+
+
+def seed_rule_database(db_path: Path) -> None:
+    """预置 3 张照片：A=夜景+高感，B=只有夜景，C=只有高感。"""
+    with PhotoDatabase.open(db_path) as db:
+        db.upsert_many(
+            [
+                make_info(
+                    Path("D:/Photos/2026/a.NEF"),
+                    taken_at="2026-09-18 20:15:00",
+                    iso=6400,
+                ),
+                make_info(
+                    Path("D:/Photos/2026/b.NEF"),
+                    taken_at="2026-09-18 21:00:00",
+                    iso=200,
+                ),
+                make_info(
+                    Path("D:/Photos/2026/c.NEF"),
+                    taken_at="2026-09-18 12:00:00",
+                    iso=6400,
+                ),
+            ]
+        )
+
+
+def test_cli_classify_prints_rule_counts(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db_path = tmp_path / "photos.db"
+    seed_rule_database(db_path)
+
+    exit_code = main(["classify", "--db", str(db_path)])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "规则分类完成（共 3 张）" in output
+    assert "夜景  Night" in output
+    assert "高感  High ISO" in output
+    assert "ISO ≥ 3200" in output
+    assert "时间窗 18:00–06:00" in output
+
+
+def test_cli_filter_and_matches_intersection(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db_path = tmp_path / "photos.db"
+    seed_rule_database(db_path)
+
+    exit_code = main(["filter", "--db", str(db_path), "--rules", "night,high_iso"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "a.NEF" in output
+    assert "b.NEF" not in output
+    assert "（共 1 张）" in output
+
+
+def test_cli_filter_or_matches_union(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db_path = tmp_path / "photos.db"
+    seed_rule_database(db_path)
+
+    exit_code = main(["filter", "--db", str(db_path), "--rules", "night,high_iso", "--or"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "a.NEF" in output and "b.NEF" in output and "c.NEF" in output
+    assert "（共 3 张）" in output
+
+
+def test_cli_filter_explain_prints_reasons(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db_path = tmp_path / "photos.db"
+    seed_rule_database(db_path)
+
+    exit_code = main(["filter", "--db", str(db_path), "--rules", "night,high_iso", "--explain"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "夜景：" in output
+    assert "ISO 6400 ≥ 3200" in output
+
+
+def test_cli_filter_gps_only(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db_path = tmp_path / "photos.db"
+    with PhotoDatabase.open(db_path) as db:
+        db.upsert_many(
+            [
+                make_info(Path("D:/Photos/g1.NEF")),  # make_info 默认带 GPS
+                make_info(
+                    Path("D:/Photos/g2.NEF"),
+                    gps_latitude=None,
+                    gps_longitude=None,
+                ),
+            ]
+        )
+
+    exit_code = main(["filter", "--db", str(db_path), "--gps"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "g1.NEF" in output
+    assert "g2.NEF" not in output
+
+
+def test_cli_filter_without_condition_returns_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db_path = tmp_path / "photos.db"
+    seed_rule_database(db_path)
+
+    exit_code = main(["filter", "--db", str(db_path)])
+
+    assert exit_code == 2
+    assert "--rules 或 --gps" in capsys.readouterr().out
+
+
+def test_cli_filter_unknown_rule_exits(tmp_path: Path) -> None:
+    db_path = tmp_path / "photos.db"
+    seed_rule_database(db_path)
+
+    with pytest.raises(SystemExit):
+        main(["filter", "--db", str(db_path), "--rules", "bogus_rule"])
+
+
+def test_format_classify_report_on_empty_database(tmp_path: Path) -> None:
+    output = format_classify_report(tmp_path / "empty" / "photos.db")
+
+    assert "规则分类完成（共 0 张）" in output
+    assert "夜景" in output

@@ -34,7 +34,7 @@ Design principles carried over from the project plan:
 | # | Region | Contents | Wired up in |
 | --- | --- | --- | --- |
 | 1 | **Toolbar** | Folder path input + `Browse…` + `Start Scan`; hint "read-only scan, original files are never touched" | V1.5 (now) |
-| 2 | **Library & filter panel** (left) | **Folder library**: every imported folder with photo count and a checkbox — checked folders are scanned together; `+ Add Folder`. Below: tag checkboxes (night / architecture / sky / people / sports / food / flowers), parameter conditions (ISO ≥, focal length ≥, shutter ≤), AND / OR logic, `Apply Filter`, live match count | Folder library = V1.5 (now); tags = V3, parameters & logic = V4 — placeholders for now |
+| 2 | **Library & filter panel** (left) | **Folder library**: every imported folder with photo count and a checkbox — checked folders are scanned together; `+ Add Folder`. Below: **auto tags (EXIF rules, V2 wired)** — night / high ISO / slow shutter / telephoto / wide angle / fast lens, filtering live as you tick; "only photos with GPS"; AND / OR combination; `Clear filters`; numeric conditions (V4 placeholder) | Folder library = V1.5; rule tags = V2 (wired); parameters = V4 — placeholder |
 | 3 | **Results grid** (center) | Thumbnail cards: preview, file name, one-line EXIF summary (aperture · shutter · ISO), tag chips; grid/list view toggle; single-click selects, double-click reveals the file in Explorer | Grid with file info = V1.5 (now); thumbnails & tag chips = V3+ |
 | 4 | **Detail panel** (right) | Large preview, file name + format/status badges, size & modified time, full EXIF table (capture time, camera, lens, focal length, aperture, shutter, ISO, exposure compensation, GPS, dimensions), EXIF status; actions: `Reveal in Explorer`, `Copy Path` (both V1.5); `Export…` and `Import to Lightroom` (disabled, V5) | V1.5 (now) for info + first two actions |
 | 5 | **Status bar** (bottom) | Last scan time, library-wide totals: total files, succeeded (green), errors (orange) + reassurance note, database location | V1.5 (now) |
@@ -108,6 +108,9 @@ dependency so the core stays dependency-free.
 
 ## 8. Changelog
 
+- r4 (2026-10-18): filter panel wired to the V2 rule engine (6 EXIF rules,
+  live filtering, AND/OR, GPS-only, clear); results gain an "Auto tags"
+  column; the detail panel lists rule-match reasons.
 - r3 (2026-10-18): **GUI V1.5 shell implemented** (Tkinter — PySide6 cannot be
   installed in this environment; layout and interactions follow this design):
   folder library, background scan with progress + cancel, results list, detail

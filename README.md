@@ -77,6 +77,26 @@ post-processing software.
     path);
   - `stats`: database statistics (by file type / EXIF status / camera / lens).
 
+### V2: Rule-Based Classification ✅
+
+- **6 built-in EXIF rules** (all thresholds configurable via `RuleConfig` in
+  `src/rules.py`):
+  - Night: capture time inside the night window (default 18:00–06:00)
+  - High ISO: ISO ≥ 3200; Slow shutter: slower than 1/30 s; Telephoto: focal
+    length ≥ 70 mm
+  - Wide angle: focal length ≤ 24 mm; Fast lens: aperture ≤ f/2.8
+- **Explainable**: every match carries a reason with actual values, e.g.
+  `ISO 6400 ≥ 3200`, `焦距 120 mm ≥ 70 mm`;
+- **Missing EXIF never errors**: rules simply do not match; the photo stays in
+  the all-photos view;
+- **One photo can match several rules** (the "one photo, many tags" idea);
+- **CLI**: `classify` (per-rule report) + `filter` (rule-based filtering with
+  AND/OR, `--explain` for reasons, `--gps` for GPS-only photos);
+- **GUI**: the filter panel checkboxes are wired to the rule engine and filter
+  the results list live; results gain an "Auto tags" column; the detail panel
+  shows "Rule matches" with reasons; a "only photos with GPS" filter is
+  available.
+
 ### GUI Shell (GUI V1.5) ✅
 
 - **Folder library**: import multiple folders, tick the ones to scan, scan
@@ -109,6 +129,16 @@ python -m src.main show --match DSC_0012
 
 # 4. Show statistics
 python -m src.main stats
+
+# 5. Rule classification report (V2)
+python -m src.main classify
+
+# 6. Filter by rules (V2): night AND high ISO, with explanations
+python -m src.main filter --rules night,high_iso --explain
+
+# 7. Night OR telephoto; or only photos with GPS
+python -m src.main filter --rules night,telephoto --or
+python -m src.main filter --gps
 ```
 
 > Note: the CLI currently prints reports in Chinese; localization is planned
@@ -163,7 +193,7 @@ DSC_0001.NEF  [NEF]
 python -m pytest
 ```
 
-The suite contains 101 tests, all based on temporary files synthesized to the
+The suite contains 160 tests, all based on temporary files synthesized to the
 TIFF / EXIF / PNG specifications (see `tests/exif_maker.py`) — no real photos
 are needed and no local files are touched. The GUI tests build the real window
 off-screen without entering the main loop.
@@ -177,14 +207,17 @@ PhotoClassifier/
 │   ├── photo_info.py    # V1.5: photo info data structure (file info + EXIF fields)
 │   ├── exif_reader.py   # V1.5: zero-dependency EXIF parser (NEF/JPEG/PNG)
 │   ├── database.py      # V1.5: SQLite photo information database (incl. folder library)
-│   ├── main.py          # V1.5: CLI entry point (scan / show / stats)
-│   └── gui.py           # GUI V1.5: graphical shell (Tkinter)
+│   ├── rules.py         # V2: EXIF rule engine (6 built-in rules, configurable)
+│   ├── formatting.py    # shared display formatting (CLI / GUI / rules)
+│   ├── main.py          # CLI entry point (scan / show / stats / classify / filter)
+│   └── gui.py           # GUI: graphical shell (Tkinter, with rule filtering)
 ├── tests/
 │   ├── test_scanner.py      # V1 scanner tests
 │   ├── test_exif_reader.py  # EXIF parsing tests (incl. corrupted-file tolerance)
 │   ├── test_database.py     # database read/write tests
+│   ├── test_rules.py        # rule engine tests (boundaries + performance baseline)
 │   ├── test_main.py         # CLI & end-to-end integration tests
-│   ├── test_gui.py          # GUI shell tests
+│   ├── test_gui.py          # GUI shell tests (incl. rule filtering)
 │   └── exif_maker.py        # helper to synthesize NEF/JPEG/PNG test files
 ├── assets/              # application icon
 ├── data/                # local data directory (gitignored; database default location)
@@ -209,8 +242,8 @@ PhotoClassifier/
 | --- | --- | --- |
 | V0 | Project foundation (repo, venv, structure, README) | ✅ Done |
 | V1 | Folder scanning & basic NEF support (type detection, fault tolerance, report) | ✅ Done |
-| V1.5 | EXIF & photo information (parser, database, CLI) | ✅ Done (current) |
-| V2 | Rule-based classification (night / high-ISO / slow shutter / telephoto / wide-angle / by camera & lens, no AI) | Planned |
+| V1.5 | EXIF & photo information (parser, database, CLI) | ✅ Done |
+| V2 | Rule-based classification (night / high-ISO / slow shutter / telephoto / wide-angle / fast lens; CLI + GUI filtering) | ✅ Done (current) |
 | V2.5 | Image quality analysis (blur / exposure anomalies / duplicates — hints only, never auto-delete) | Planned |
 | V3 | Multi-tag system (#night #architecture …; one photo, many tags) | Planned |
 | V3.5 | Visual recognition (compare traditional CV / local models / AI APIs) | Planned |
