@@ -29,9 +29,20 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 
 from src.database import PhotoDatabase
+from src.duplicates import DuplicateResult
 from src.exif_reader import read_photo_info
 from src.formatting import format_shutter, format_size
 from src.photo_info import EXIF_ERROR, EXIF_NO_EXIF, EXIF_OK, PhotoInfo
+from src.preview import PILLOW_AVAILABLE, is_supported
+from src.quality import (
+    FLAG_IDS,
+    FLAG_LABELS,
+    QualityEngine,
+    QualityFlag,
+    QualityMeasurement,
+)
+from src.quality_scan import AnalyzeOptions, analyze_photos, rebuild_duplicates
+from src.quality_store import QualityStore
 from src.rules import RULE_REGISTRY, RuleEngine, RuleMatch
 from src.scanner import scan_folder
 
@@ -60,15 +71,26 @@ TEXT_FAINT = "#6e717e"
 
 #: 结果列表的列定义：(键, 标题, 宽度, 锚)
 _RESULT_COLUMNS = [
-    ("name", "文件名", 200, "w"),
-    ("category", "类型", 60, "w"),
+    ("name", "文件名", 190, "w"),
+    ("category", "类型", 55, "w"),
     ("taken_at", "拍摄时间", 150, "w"),
-    ("camera", "相机", 130, "w"),
-    ("iso", "ISO", 60, "e"),
-    ("shutter", "快门", 85, "e"),
+    ("camera", "相机", 120, "w"),
+    ("iso", "ISO", 50, "e"),
+    ("shutter", "快门", 80, "e"),
     ("rules", "自动标签", 150, "w"),
-    ("size", "大小", 90, "e"),
+    ("quality", "质量", 95, "w"),
+    ("size", "大小", 85, "e"),
 ]
+
+#: 质量列的紧凑写法（空间有限，详情面板里显示完整原因）
+_QUALITY_SHORT = {
+    "blurry": "模糊",
+    "motion_blur": "运动",
+    "overexposed": "过曝",
+    "underexposed": "欠曝",
+    "black_frame": "黑屏",
+    "duplicate": "重复",
+}
 
 #: 详情面板展示的字段（与 V1.5 数据库字段一一对应）
 _DETAIL_FIELDS = [
@@ -116,33 +138,61 @@ class PhotoClassifierApp:
         self.root = root
         self.db = PhotoDatabase.open(db_path)
         self.db_path = Path(db_path)
+        self.quality_store = QualityStore.open(db_path)
 
         self.checked_folders: set[str] = set()
         self.infos_by_iid: dict[str, PhotoInfo] = {}
         self.matches_by_iid: dict[str, list[RuleMatch]] = {}
+        self.quality_by_iid: dict[str, list[QualityFlag]] = {}
         self.current: PhotoInfo | None = None
         self.scan_thread: threading.Thread | None = None
         self.cancel_event = threading.Event()
         self.msg_queue: queue.Queue = queue.Queue()
 
+        self.analyze_thread: threading.Thread | None = None
+        self.analyze_cancel = threading.Event()
+        self.analyze_queue: queue.Queue = queue.Queue()
+        self.analyze_report = None
+
         self.rule_engine = RuleEngine()
+        self.quality_engine = QualityEngine()
         self.active_rules: set[str] = set()
+        self.active_quality: set[str] = set()
         self.and_mode = tk.BooleanVar(value=True)
         self.gps_only = tk.BooleanVar(value=False)
         self.rule_vars: dict[str, tk.BooleanVar] = {}
+        self.quality_vars: dict[str, tk.BooleanVar] = {}
+        self.measurements_by_path: dict[str, QualityMeasurement] = {}
+        self.duplicates = DuplicateResult()
+        self._quality_revision = 0
+        self._quality_cache_revision = -1
 
         self._setup_window()
         self._build_styles()
         self._build_toolbar()
         self._build_left_panel()
-        self._build_center()
+        # 先放右侧详情面板、再放中间（中间 expand 会吃掉剩余空间）
         self._build_detail_panel()
+        self._build_center()
         self._build_status_bar()
 
         self.refresh_library()
         self.refresh_results()
         self.refresh_status_bar()
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_mousewheel(self, event) -> None:
+        """鼠标在左侧筛选栏 / 右侧详情栏上时滚动对应面板。"""
+        widget = self.root.winfo_containing(event.x_root, event.y_root)
+        while widget is not None:
+            if widget is getattr(self, "left_canvas", None):
+                self.left_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+                return
+            if widget is getattr(self, "detail_canvas", None):
+                self.detail_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+                return
+            widget = widget.master
 
     # ------------------------------------------------------------------ #
     # 窗口与样式
@@ -150,8 +200,8 @@ class PhotoClassifierApp:
 
     def _setup_window(self) -> None:
         self.root.title("PhotoClassifier")
-        self.root.geometry("1400x840")
-        self.root.minsize(1120, 680)
+        self.root.geometry("1660x900")
+        self.root.minsize(1200, 700)
         self.root.configure(bg=WIN_BG)
         if ICON_PATH.exists():
             try:
@@ -245,7 +295,11 @@ class PhotoClassifierApp:
         self.btn_browse = self._button(bar, "浏览…", self.add_folder_dialog)
         self.btn_browse.pack(side="left", padx=(0, 10))
         self.btn_scan = self._button(bar, "开始扫描", self.start_scan, primary=True)
-        self.btn_scan.pack(side="left", padx=(0, 12))
+        self.btn_scan.pack(side="left", padx=(0, 8))
+        self.btn_analyze = self._button(bar, "质量分析", self.start_analysis)
+        self.btn_analyze.pack(side="left", padx=(0, 12))
+        if not PILLOW_AVAILABLE:
+            self.btn_analyze.config(state="disabled", fg=TEXT_FAINT)
         tk.Label(
             bar, text="只读扫描 · 不会改动原始文件", bg=WIN_BG, fg=TEXT_FAINT, font=self._font(9)
         ).pack(side="left", padx=(0, 16))
@@ -255,9 +309,24 @@ class PhotoClassifierApp:
     # ------------------------------------------------------------------ #
 
     def _build_left_panel(self) -> None:
-        panel = tk.Frame(self.root, bg=PANEL_BG, width=286)
-        panel.pack(side="left", fill="y")
-        panel.pack_propagate(False)
+        outer = tk.Frame(self.root, bg=PANEL_BG, width=270)
+        outer.pack(side="left", fill="y")
+        outer.pack_propagate(False)
+
+        # 面板内容比窗口高时（小屏幕 / 系统缩放），用滚动条保证所有控件可达
+        canvas = tk.Canvas(outer, bg=PANEL_BG, highlightthickness=0, width=258)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        panel = tk.Frame(canvas, bg=PANEL_BG)
+        window = canvas.create_window((0, 0), window=panel, anchor="nw", width=258)
+        panel.bind(
+            "<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        self.left_canvas = canvas
 
         tk.Label(panel, text="文件夹库", bg=PANEL_BG, fg=TEXT, font=self._font(11, bold=True)).pack(
             anchor="w", padx=16, pady=(14, 6)
@@ -315,6 +384,32 @@ class PhotoClassifierApp:
             selectcolor=INPUT_BG,
             font=self._font(9),
         ).pack(anchor="w")
+
+        tk.Frame(panel, bg=BORDER_SOFT, height=1).pack(fill="x", padx=12, pady=(8, 6))
+        tk.Label(
+            panel, text="质量分析（V2.5）", bg=PANEL_BG, fg=TEXT, font=self._font(10, bold=True)
+        ).pack(anchor="w", padx=16)
+        tk.Label(
+            panel, text="模糊 / 曝光 / 重复 · 勾选后实时筛选", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
+        ).pack(anchor="w", padx=16, pady=(0, 4))
+
+        quality = tk.Frame(panel, bg=PANEL_BG)
+        quality.pack(fill="x", padx=12)
+        for i, flag_id in enumerate(FLAG_IDS):
+            var = tk.BooleanVar(value=False)
+            self.quality_vars[flag_id] = var
+            tk.Checkbutton(
+                quality,
+                text=FLAG_LABELS[flag_id],
+                variable=var,
+                command=self._on_filter_changed,
+                bg=PANEL_BG,
+                fg=TEXT,
+                activebackground=PANEL_BG,
+                activeforeground=TEXT,
+                selectcolor=INPUT_BG,
+                font=self._font(9),
+            ).grid(row=i // 2, column=i % 2, sticky="w", pady=1, padx=(0, 6))
 
         logic_row = tk.Frame(panel, bg=PANEL_BG)
         logic_row.pack(fill="x", padx=16, pady=(8, 0))
@@ -408,16 +503,55 @@ class PhotoClassifierApp:
     # ------------------------------------------------------------------ #
 
     def _build_detail_panel(self) -> None:
-        panel = tk.Frame(self.root, bg=PANEL_BG, width=380)
+        panel = tk.Frame(self.root, bg=PANEL_BG, width=360)
         panel.pack(side="right", fill="y")
         panel.pack_propagate(False)
         self.detail_panel = panel
-        pad = dict(anchor="w", padx=18)
 
-        self.preview_canvas = tk.Canvas(panel, bg=CARD_BG, height=130, highlightthickness=0)
+        # ---- 固定在底部的操作区（不随内容滚动） ----
+        actions_area = tk.Frame(panel, bg=PANEL_BG)
+        actions_area.pack(side="bottom", fill="x", pady=(4, 10))
+        tk.Frame(actions_area, bg=BORDER_SOFT, height=1).pack(fill="x", padx=18, pady=(0, 10))
+        actions = tk.Frame(actions_area, bg=PANEL_BG)
+        actions.pack(fill="x", padx=18)
+        self.btn_reveal = self._button(actions, "打开文件位置", self.reveal_selected)
+        self.btn_reveal.pack(side="left", padx=(0, 8), ipady=2)
+        self.btn_copy = self._button(actions, "复制路径", self.copy_selected_path)
+        self.btn_copy.pack(side="left", ipady=2)
+        actions2 = tk.Frame(actions_area, bg=PANEL_BG)
+        actions2.pack(fill="x", padx=18, pady=(8, 0))
+        self._button(actions2, "导出…", None, disabled=True).pack(side="left", padx=(0, 8), ipady=2)
+        self._button(actions2, "导入到 Lightroom", None, disabled=True).pack(side="left", ipady=2)
+        tk.Label(
+            actions_area,
+            text="导出只复制不移动；交给 Lightroom 前需确认（V5 接入）",
+            bg=PANEL_BG,
+            fg=TEXT_FAINT,
+            font=self._font(8),
+            wraplength=320,
+            justify="left",
+        ).pack(fill="x", padx=18, pady=(8, 0))
+
+        # ---- 可滚动的内容区 ----
+        canvas = tk.Canvas(panel, bg=PANEL_BG, highlightthickness=0, width=344)
+        scrollbar = ttk.Scrollbar(panel, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        content = tk.Frame(canvas, bg=PANEL_BG)
+        window = canvas.create_window((0, 0), window=content, anchor="nw", width=344)
+        content.bind(
+            "<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        self.detail_canvas = canvas
+        self.detail_content = content
+
+        self.preview_canvas = tk.Canvas(content, bg=CARD_BG, height=112, highlightthickness=0)
         self.preview_canvas.pack(fill="x", padx=14, pady=(14, 0))
 
-        name_row = tk.Frame(panel, bg=PANEL_BG)
+        name_row = tk.Frame(content, bg=PANEL_BG)
         name_row.pack(fill="x", padx=18, pady=(10, 0))
         self.detail_name = tk.Label(name_row, text="未选择照片", bg=PANEL_BG, fg=TEXT, font=self._font(12, bold=True))
         self.detail_name.pack(side="left")
@@ -426,36 +560,27 @@ class PhotoClassifierApp:
         self.badge_status = tk.Label(name_row, text="", bg=INPUT_BG, fg=GREEN, font=self._font(8, bold=True))
         self.badge_status.pack(side="left", ipadx=5, ipady=1)
 
-        self.detail_meta = tk.Label(panel, text="", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(8))
+        self.detail_meta = tk.Label(content, text="", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(8))
         self.detail_meta.pack(fill="x", padx=18, pady=(4, 8))
-        tk.Frame(panel, bg=BORDER_SOFT, height=1).pack(fill="x", padx=18)
+        tk.Frame(content, bg=BORDER_SOFT, height=1).pack(fill="x", padx=18)
 
-        self.detail_rows = tk.Frame(panel, bg=PANEL_BG)
+        self.detail_rows = tk.Frame(content, bg=PANEL_BG)
         self.detail_rows.pack(fill="x", padx=18, pady=(8, 0))
 
-        # 规则命中（V2）：自动标签与原因
-        tk.Label(panel, text="规则命中", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(8, bold=True)).pack(
+        # 质量分析（V2.5）：紧凑摘要 + 标记原因（放在规则之前，V2.5 的重点）
+        tk.Label(content, text="质量分析", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(8, bold=True)).pack(
             anchor="w", padx=18, pady=(8, 2)
         )
-        self.rules_frame = tk.Frame(panel, bg=PANEL_BG)
-        self.rules_frame.pack(fill="x", padx=18)
+        self.quality_frame = tk.Frame(content, bg=PANEL_BG)
+        self.quality_frame.pack(fill="x", padx=18)
 
-        tk.Frame(panel, bg=BORDER_SOFT, height=1).pack(fill="x", padx=18, pady=(8, 10))
-        actions = tk.Frame(panel, bg=PANEL_BG)
-        actions.pack(fill="x", padx=18)
-        self.btn_reveal = self._button(actions, "打开文件位置", self.reveal_selected)
-        self.btn_reveal.pack(side="left", padx=(0, 8), ipady=2)
-        self.btn_copy = self._button(actions, "复制路径", self.copy_selected_path)
-        self.btn_copy.pack(side="left", ipady=2)
-        actions2 = tk.Frame(panel, bg=PANEL_BG)
-        actions2.pack(fill="x", padx=18, pady=(8, 0))
-        self._button(actions2, "导出…", None, disabled=True).pack(side="left", padx=(0, 8), ipady=2)
-        self._button(actions2, "导入到 Lightroom", None, disabled=True).pack(side="left", ipady=2)
-        tk.Label(
-            panel,
-            text="导出只复制不移动；交给 Lightroom 前需确认（V5 接入）",
-            bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8),
-        ).pack(fill="x", padx=18, pady=(10, 0))
+        # 规则命中（V2）：自动标签与原因
+        tk.Label(content, text="规则命中", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(8, bold=True)).pack(
+            anchor="w", padx=18, pady=(10, 2)
+        )
+        self.rules_frame = tk.Frame(content, bg=PANEL_BG)
+        self.rules_frame.pack(fill="x", padx=18, pady=(0, 14))
+
         self.set_detail(None)
 
     def _draw_preview(self, info: PhotoInfo | None) -> None:
@@ -479,6 +604,8 @@ class PhotoClassifierApp:
         self._draw_preview(info)
         for child in self.rules_frame.winfo_children():
             child.destroy()
+        for child in self.quality_frame.winfo_children():
+            child.destroy()
         if info is None:
             self.detail_name.config(text="未选择照片")
             self.badge_format.config(text="")
@@ -488,6 +615,9 @@ class PhotoClassifierApp:
                 child.destroy()
             tk.Label(
                 self.rules_frame, text="未命中任何规则", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
+            ).pack(anchor="w")
+            tk.Label(
+                self.quality_frame, text="—", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
             ).pack(anchor="w")
             self.btn_reveal.config(state="disabled", command=None)
             self.btn_copy.config(state="disabled", command=None)
@@ -547,7 +677,101 @@ class PhotoClassifierApp:
                 bg=PANEL_BG,
                 fg=TEXT_SUB,
                 font=self._font(8),
-                wraplength=270,
+                wraplength=280,
+                justify="left",
+            ).pack(side="left", anchor="w")
+
+        self._fill_quality_detail(info)
+
+    # ------------------------------------------------------------------ #
+    # 质量分析：筛选、详情与分析流程（V2.5）
+    # ------------------------------------------------------------------ #
+
+    def _quality_flags_for(self, info: PhotoInfo) -> list[QualityFlag]:
+        """一张照片当前的质量标记（含重复）。"""
+        key = str(info.path.resolve())
+        measurement = self.measurements_by_path.get(key)
+        if measurement is None or not measurement.analyzed:
+            return []
+        flags = self.quality_engine.flags(measurement, info)
+        reason = self.duplicates.flag_reason(info.path)
+        if reason:
+            flags.append(QualityFlag("duplicate", FLAG_LABELS["duplicate"], reason))
+        return flags
+
+    def _fill_quality_detail(self, info: PhotoInfo) -> None:
+        key = str(info.path.resolve())
+        measurement = self.measurements_by_path.get(key)
+        if measurement is None:
+            tk.Label(
+                self.quality_frame,
+                text="未分析（点击工具栏「质量分析」）",
+                bg=PANEL_BG,
+                fg=TEXT_FAINT,
+                font=self._font(8),
+                anchor="w",
+            ).pack(fill="x")
+            return
+        if measurement.error or not measurement.analyzed:
+            tk.Label(
+                self.quality_frame,
+                text=measurement.error or "没有可用的测量值",
+                bg=PANEL_BG,
+                fg=ORANGE,
+                font=self._font(8),
+                wraplength=305,
+                justify="left",
+                anchor="w",
+            ).pack(fill="x")
+            return
+
+        flags = self._quality_flags_for(info)
+        source = {
+            "embedded_jpeg": "内嵌预览",
+            "full_image": "原图",
+            "none": "无预览",
+        }.get(measurement.preview_source, measurement.preview_source)
+        summary = (
+            f"清晰度 {measurement.blur_score:.0f} · 对比度 {measurement.contrast:.0f} · "
+            f"亮度 {measurement.mean_lum:.0f} · "
+            f"高光 {measurement.clip_high_frac:.1%} / 暗部 {measurement.clip_low_frac:.1%}"
+        )
+        tk.Label(
+            self.quality_frame,
+            text=f"{source} {measurement.preview_width or '—'}×{measurement.preview_height or '—'}",
+            bg=PANEL_BG,
+            fg=TEXT_FAINT,
+            font=self._font(8),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            self.quality_frame,
+            text=summary,
+            bg=PANEL_BG,
+            fg=TEXT_SUB,
+            font=self._font(8),
+            wraplength=305,
+            justify="left",
+            anchor="w",
+        ).pack(fill="x")
+        if not flags:
+            tk.Label(
+                self.quality_frame, text="未发现异常", bg=PANEL_BG, fg=GREEN, font=self._font(8), anchor="w"
+            ).pack(fill="x")
+            return
+        for flag in flags:
+            row = tk.Frame(self.quality_frame, bg=PANEL_BG)
+            row.pack(fill="x", pady=1)
+            tk.Label(
+                row, text=f"{flag.label}：", bg=PANEL_BG, fg=ORANGE, font=self._font(8, bold=True)
+            ).pack(side="left", anchor="n")
+            tk.Label(
+                row,
+                text=flag.reason,
+                bg=PANEL_BG,
+                fg=TEXT_SUB,
+                font=self._font(8),
+                wraplength=250,
                 justify="left",
             ).pack(side="left", anchor="w")
 
@@ -577,6 +801,19 @@ class PhotoClassifierApp:
         parts.append(f"库中总文件 {total:,}")
         parts.append(f"成功 {total - err:,}")
         parts.append(f"异常 {err:,}")
+        try:
+            analyzable = sum(
+                count
+                for category, count in self.db.count_by("category").items()
+                if is_supported(category)
+            )
+            stats = self.quality_store.stats()
+            quality_note = f"质量已分析 {stats.analyzed:,}/{analyzable:,}"
+            parts.append(quality_note)
+            if self.duplicates.groups:
+                parts.append(f"重复 {len(self.duplicates.groups):,} 组")
+        except Exception:
+            pass
         self.status_left.config(text=" · ".join(parts))
 
     # ------------------------------------------------------------------ #
@@ -640,17 +877,28 @@ class PhotoClassifierApp:
         photos = self.db.find_photos_under(folders)
         self.infos_by_iid = {str(info.path): info for info in photos}
         self.matches_by_iid = {}
+        self.quality_by_iid = {}
+        self._ensure_quality_cache(photos)
 
         self.result_tree.delete(*self.result_tree.get_children())
         visible = 0
         for info in photos:
             matches = self.rule_engine.evaluate(info)
-            if not self._passes_filter(info, matches):
+            quality_flags = self._quality_flags_for(info)
+            if not self._passes_filter(info, matches, quality_flags):
                 continue
             iid = str(info.path)
             self.matches_by_iid[iid] = matches
+            self.quality_by_iid[iid] = quality_flags
             shutter = format_shutter(info.exposure_time_s) if info.exposure_time_s else ""
             labels = " · ".join(match.label for match in matches)
+            quality_text = " · ".join(
+                _QUALITY_SHORT.get(flag.flag_id, flag.label) for flag in quality_flags
+            )
+            if not quality_text:
+                measurement = self.measurements_by_path.get(str(info.path.resolve()))
+                if measurement is not None and measurement.error:
+                    quality_text = "失败"
             values = (
                 info.file_name,
                 _category_label(info.category),
@@ -659,6 +907,7 @@ class PhotoClassifierApp:
                 str(info.iso) if info.iso is not None else "",
                 shutter,
                 labels,
+                quality_text,
                 format_size(info.size_bytes),
             )
             tags = []
@@ -671,7 +920,7 @@ class PhotoClassifierApp:
 
         total = self.db.count_photos()
         filter_note = ""
-        if self.active_rules or self.gps_only.get():
+        if self.active_rules or self.active_quality or self.gps_only.get():
             filter_note = " · 已筛选"
         self.count_label.config(
             text=f"库中共 {total:,} 个文件 · 当前显示 {visible:,} 张{filter_note}"
@@ -681,15 +930,31 @@ class PhotoClassifierApp:
             if keep is not None and str(keep.path) in self.matches_by_iid:
                 self.set_detail(keep)
 
-    def _passes_filter(self, info: PhotoInfo, matches: list[RuleMatch]) -> bool:
-        """当前筛选条件是否接受这张照片。"""
+    def _ensure_quality_cache(self, photos: list[PhotoInfo]) -> None:
+        """测量值与重复分组只在质量数据变化后重算，避免每次筛选都全量重跑。"""
+        if self._quality_cache_revision == self._quality_revision:
+            return
+        measurements = list(self.quality_store.iter_measurements())
+        self.measurements_by_path = {measurement.path: measurement for measurement in measurements}
+        self.duplicates = rebuild_duplicates(self.quality_store, photos)
+        self._quality_cache_revision = self._quality_revision
+
+    def _passes_filter(
+        self,
+        info: PhotoInfo,
+        matches: list[RuleMatch],
+        quality_flags: list[QualityFlag],
+    ) -> bool:
+        """当前筛选条件是否接受这张照片（自动标签与质量标记共用 AND/OR）。"""
         if self.gps_only.get() and not info.has_gps:
             return False
-        if self.active_rules:
+        selected = self.active_rules | self.active_quality
+        if selected:
             hit = {match.rule_id for match in matches}
+            hit |= {flag.flag_id for flag in quality_flags}
             if self.and_mode.get():
-                return self.active_rules.issubset(hit)
-            return bool(self.active_rules & hit)
+                return selected.issubset(hit)
+            return bool(selected & hit)
         return True
 
     def _on_filter_changed(self) -> None:
@@ -698,13 +963,21 @@ class PhotoClassifierApp:
             for rule_id, var in self.rule_vars.items()
             if var.get()
         }
+        self.active_quality = {
+            flag_id
+            for flag_id, var in self.quality_vars.items()
+            if var.get()
+        }
         self.refresh_results()
 
     def clear_filters(self) -> None:
         for var in self.rule_vars.values():
             var.set(False)
+        for var in self.quality_vars.values():
+            var.set(False)
         self.gps_only.set(False)
         self.active_rules = set()
+        self.active_quality = set()
         self.refresh_results()
 
     @staticmethod
@@ -766,12 +1039,15 @@ class PhotoClassifierApp:
             self.progress_detail.config(text="")
             self.progress_current.config(text="")
             self.btn_scan.config(text="扫描中…", state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
+            self.btn_analyze.config(state="disabled", fg=TEXT_FAINT)
             for btn in (self.btn_browse, self.btn_add, self.btn_remove):
                 btn.config(state="disabled")
         else:
             self.progress_frame.pack_forget()
             self.result_frame.pack(fill="both", expand=True)
             self.btn_scan.config(text="开始扫描", state="normal", bg=ACCENT, fg="#ffffff")
+            if PILLOW_AVAILABLE:
+                self.btn_analyze.config(state="normal", fg=TEXT)
             for btn in (self.btn_browse, self.btn_add, self.btn_remove):
                 btn.config(state="normal")
 
@@ -815,6 +1091,7 @@ class PhotoClassifierApp:
                 elif kind == "done":
                     cancelled = self.cancel_event.is_set()
                     self._set_scanning_ui(False)
+                    self._quality_revision += 1
                     self.refresh_library()
                     self.refresh_results()
                     self.refresh_status_bar()
@@ -827,21 +1104,152 @@ class PhotoClassifierApp:
             self.root.after(100, self._poll_scan_queue)
 
     # ------------------------------------------------------------------ #
+    # 质量分析流程（V2.5，后台线程 + 队列轮询，可取消）
+    # ------------------------------------------------------------------ #
+
+    def start_analysis(self) -> None:
+        if not PILLOW_AVAILABLE:
+            messagebox.showinfo(
+                "质量分析",
+                "需要安装 Pillow 才能分析图像质量：\n\n"
+                "pip install -r requirements-quality.txt\n\n"
+                "未安装时扫描、EXIF、规则筛选仍然可用。",
+            )
+            return
+        if self.analyze_thread and self.analyze_thread.is_alive():
+            return
+        if self.scan_thread and self.scan_thread.is_alive():
+            return
+        folders = [f.path for f in self.db.list_folders() if str(f.path) in self.checked_folders]
+        if not folders:
+            messagebox.showinfo("质量分析", "请先在左侧文件夹库勾选至少一个要分析的文件夹。")
+            return
+        infos = self.db.find_photos_under(folders)
+        if not infos:
+            messagebox.showinfo("质量分析", "勾选的文件夹里还没有照片记录，请先扫描。")
+            return
+
+        if not messagebox.askyesno(
+            "质量分析",
+            "将对勾选文件夹中的照片分析图像质量（清晰度 / 曝光 / 重复）。\n\n"
+            "· 只读分析，不会改动任何原始文件\n"
+            "· 只处理未分析或已变更的照片，可以随时取消\n\n继续？",
+        ):
+            return
+
+        self.analyze_cancel.clear()
+        self._set_analyzing_ui(True)
+        self.analyze_thread = threading.Thread(
+            target=self._analyze_worker, args=(infos,), daemon=True
+        )
+        self.analyze_thread.start()
+        self.root.after(120, self._poll_analyze_queue)
+
+    def cancel_analysis(self) -> None:
+        self.analyze_cancel.set()
+        self.progress_current.config(text="正在取消……（等待当前批次写入完成）")
+
+    def _set_analyzing_ui(self, analyzing: bool) -> None:
+        if analyzing:
+            self.result_frame.pack_forget()
+            self.progress_frame.pack(fill="both", expand=True)
+            self.progress_bar.config(value=0)
+            self.progress_title.config(text="正在分析质量")
+            self.progress_folder.config(text="只读分析 · 不会改动原始文件")
+            self.progress_detail.config(text="")
+            self.progress_current.config(text="准备中……")
+            self.btn_analyze.config(text="分析中…", state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
+            self.btn_scan.config(state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
+            for btn in (self.btn_browse, self.btn_add, self.btn_remove):
+                btn.config(state="disabled")
+        else:
+            self.progress_frame.pack_forget()
+            self.result_frame.pack(fill="both", expand=True)
+            self.btn_analyze.config(text="质量分析", state="normal", bg=INPUT_BG, fg=TEXT)
+            self.btn_scan.config(text="开始扫描", state="normal", bg=ACCENT, fg="#ffffff")
+            for btn in (self.btn_browse, self.btn_add, self.btn_remove):
+                btn.config(state="normal")
+
+    def _analyze_worker(self, infos) -> None:  # 在后台线程中运行
+        try:
+            with QualityStore.open(self.db_path) as store:
+                report = analyze_photos(
+                    infos,
+                    store,
+                    options=AnalyzeOptions(workers=4),
+                    progress=lambda done, total, name: self.analyze_queue.put(
+                        ("progress", done, total, name)
+                    ),
+                    is_cancelled=self.analyze_cancel.is_set,
+                )
+            self.analyze_queue.put(("done", report))
+        except Exception as exc:  # 包括缺少 Pillow / 数据库错误
+            self.analyze_queue.put(("error", str(exc)))
+
+    def _poll_analyze_queue(self) -> None:
+        try:
+            while True:
+                msg = self.analyze_queue.get_nowait()
+                kind = msg[0]
+                if kind == "progress":
+                    _, done, total, name = msg
+                    percent = done * 100.0 / max(total, 1)
+                    self.progress_bar.config(value=percent)
+                    self.progress_detail.config(text=f"{done:,} / {total:,} · {percent:.0f}%")
+                    self.progress_current.config(text=f"当前文件：{name}")
+                elif kind == "done":
+                    report = msg[1]
+                    self.analyze_report = report
+                    self._set_analyzing_ui(False)
+                    self._quality_revision += 1
+                    self.refresh_results()
+                    self.refresh_status_bar()
+                    self.status_left.config(text=_analysis_summary(report))
+                    break
+                elif kind == "error":
+                    self._set_analyzing_ui(False)
+                    messagebox.showerror("质量分析失败", msg[1])
+                    break
+        except queue.Empty:
+            pass
+        if self.analyze_thread and self.analyze_thread.is_alive():
+            self.root.after(120, self._poll_analyze_queue)
+
+    # ------------------------------------------------------------------ #
     # 生命周期
     # ------------------------------------------------------------------ #
 
     def _on_close(self) -> None:
         self.cancel_event.set()
+        self.analyze_cancel.set()
         try:
             self.db.close()
         finally:
-            self.root.destroy()
+            try:
+                self.quality_store.close()
+            finally:
+                self.root.destroy()
 
 
 def _category_label(category: str) -> str:
     return {"nef": "NEF", "jpeg": "JPEG", "png": "PNG", "video": "视频", "unsupported": "其他"}.get(
         category, category
     )
+
+
+def _analysis_summary(report) -> str:
+    """一行状态栏摘要。"""
+    parts = [f"质量分析完成：本次 {report.analyzed_now:,} 张"]
+    counts = report.flag_counts
+    parts.append(f"模糊 {counts.get('blurry', 0):,}")
+    parts.append(f"过曝 {counts.get('overexposed', 0):,}")
+    parts.append(f"欠曝 {counts.get('underexposed', 0):,}")
+    parts.append(f"重复 {report.duplicate_groups:,} 组")
+    if report.sequence_groups:
+        parts.append(f"序列 {report.sequence_groups:,} 组")
+    if report.cancelled:
+        parts.append("已取消")
+    return " · ".join(parts)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -857,6 +1265,7 @@ def main(argv: list[str] | None = None) -> int:
                 app = PhotoClassifierApp(root, Path(tmp) / "selftest.db")
                 root.update_idletasks()
                 root.update()
+                app.quality_store.close()
                 app.db.close()  # 关闭数据库，允许临时目录被清理
             root.destroy()
             print("GUI selftest OK")
