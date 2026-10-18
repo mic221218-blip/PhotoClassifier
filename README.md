@@ -260,6 +260,24 @@ DSC_0001.NEF  [NEF]
 > The `data/` directory is in `.gitignore`: the database and any real photo
 > data stay on your machine and are never uploaded to GitHub.
 
+### Troubleshooting: "Reveal in Explorer" shows 0x80070005 / 0xc0000142
+
+If the project folder carries a Windows **Low integrity label** (left behind by a
+sandbox), the `pythonw.exe` started from it also runs at Low; Windows then refuses
+its request to make Explorer select a file (`0x80070005`, access denied) or to
+start `explorer.exe` (`0xc0000142`).
+
+Run this once:
+
+```bash
+python tools/install_shortcut.py
+```
+
+It changes the integrity level of `.venv\pythonw.exe` / `.venv\python.exe` to
+**Medium** and recreates the shortcut. **Restart the GUI** and "Reveal in Explorer"
+will open the folder with the file selected. If it still fails, the app copies the
+path to the clipboard so you can paste it into Explorer's address bar.
+
 ## Running Tests
 
 ```bash

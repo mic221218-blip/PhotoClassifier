@@ -42,6 +42,45 @@ def _copy_via_powershell(source: Path, target: Path) -> None:
     )
 
 
+def _ensure_medium_integrity(executables: list[Path]) -> None:
+    """把带 Low 完整性标签的 Python 解释器改成 Medium。
+
+    Windows 会按可执行文件的完整性级别启动进程：如果项目目录（连同 .venv）
+    被沙箱打上了 Low 标签，从快捷方式启动的 GUI 也是 Low，系统会拒绝
+    “让资源管理器定位文件”（0x80070005）。把解释器改成 Medium 后按钮才能真正生效。
+    """
+    existing = [str(path) for path in executables if path.exists()]
+    if not existing:
+        return
+    quoted = ", ".join(_ps_quote(item) for item in existing)
+    script = f"""
+foreach ($p in @({quoted})) {{
+  if (-not (Test-Path -LiteralPath $p)) {{ continue }}
+  $acl = (icacls $p) -join "`n"
+  if ($acl -match 'Low Mandatory Level|S-1-16-4096') {{
+    icacls $p /setintegritylevel Medium | Out-Null
+    Write-Output "RELABELED $p"
+  }} elseif ($acl -match 'Medium Mandatory Level|S-1-16-8192') {{
+    Write-Output "MEDIUM $p"
+  }} else {{
+    Write-Output "UNLABELED $p"
+  }}
+}}
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        if line.startswith("RELABELED"):
+            print("完整性标签已改为 Medium：", line.removeprefix("RELABELED").strip())
+        elif line.startswith("UNLABELED"):
+            print("提示：解释器没有完整性标签（通常也没问题）：", line.removeprefix("UNLABELED").strip())
+    if result.returncode != 0:
+        print("警告：检查/修改完整性格失败：", result.stderr.strip())
+
+
 def main() -> int:
     if not ICON_SOURCE.exists():
         raise SystemExit(f"图标不存在：{ICON_SOURCE}")
@@ -64,6 +103,11 @@ def main() -> int:
     if not pythonw.exists():
         pythonw = Path("pythonw.exe")
     launcher = ROOT / "run_gui.pyw"
+
+    # “打开文件位置”需要 Medium 权限；Low 标签的 venv 会被系统拒绝
+    _ensure_medium_integrity(
+        [ROOT / ".venv" / "Scripts" / "pythonw.exe", ROOT / ".venv" / "Scripts" / "python.exe"]
+    )
 
     script = f"""
 $shell = New-Object -ComObject WScript.Shell

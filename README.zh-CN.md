@@ -216,6 +216,22 @@ DSC_0001.NEF  [NEF]
 
 > `data/` 目录已在 `.gitignore` 中：数据库和真实照片数据只留在本机，不会上传到 GitHub。
 
+### 常见问题：打开文件位置提示 0x80070005 / 0xc0000142
+
+如果项目目录被沙箱打上了 Windows **Low 完整性标签**，从该目录启动的
+`pythonw.exe` 也会以 Low 运行；Windows 会拒绝它请求资源管理器定位文件
+（`0x80070005`，拒绝访问），或拒绝启动 `explorer.exe`（`0xc0000142`）。
+
+运行一次：
+
+```bash
+python tools/install_shortcut.py
+```
+
+脚本会把 `.venv` 里的 `pythonw.exe` / `python.exe` 完整性级别改为 **Medium**
+并重建快捷方式。**重新启动 GUI 后**“打开文件位置”即可直接在弹出的资源管理器
+里选中文件。若仍失败，程序会把路径复制到剪贴板，可粘贴到资源管理器地址栏。
+
 ## 运行测试
 
 ```bash
