@@ -10,3 +10,6 @@ __pycache__/
 data/
 # 历史遗留：data 曾被错误地当成空文件跟踪，这里一并忽略
 /data
+
+# pytest 临时目录（部分环境会把 basetemp 放在项目根目录）
+pytest-of-*/
