@@ -398,7 +398,7 @@ def test_cli_filter_without_condition_returns_2(tmp_path: Path, capsys: pytest.C
     exit_code = main(["filter", "--db", str(db_path)])
 
     assert exit_code == 2
-    assert "--rules 或 --gps" in capsys.readouterr().out
+    assert "--quality" in capsys.readouterr().out
 
 
 def test_cli_filter_unknown_rule_exits(tmp_path: Path) -> None:

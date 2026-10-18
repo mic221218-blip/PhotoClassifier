@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from src.gui import PhotoClassifierApp
+from src.quality import ANALYZER_VERSION, FLAG_IDS, QualityMeasurement
 
 from exif_maker import nikon_z6iii_nef
 from test_database import make_info
@@ -232,3 +233,149 @@ def test_detail_panel_shows_rule_reasons(root, db_path: Path) -> None:
     assert any("夜景" in text for text in texts)
     assert any("ISO 6400 ≥ 3200" in text for text in texts)
     app.db.close()
+
+
+# --------------------------------------------------------------------------- #
+# 质量筛选与详情（V2.5）
+# --------------------------------------------------------------------------- #
+
+
+def quality_row(
+    path: str,
+    *,
+    blur: float = 500.0,
+    contrast: float = 50.0,
+    mean: float = 110.0,
+    std: float = 45.0,
+    flag_blur: bool = False,
+) -> QualityMeasurement:
+    return QualityMeasurement(
+        path=str(Path(path).resolve()),
+        analyzer_version=ANALYZER_VERSION,
+        analyzed_at="2026-07-13 06:00:00",
+        preview_source="full_image",
+        preview_width=640,
+        preview_height=480,
+        blur_score=blur,
+        contrast=contrast,
+        anisotropy=0.10,
+        mean_lum=mean,
+        std_lum=std,
+        clip_low_frac=0.001,
+        clip_high_frac=0.001,
+        dhash="0" * 16,
+        quick_hash="quick",
+        file_size=12345,
+        file_mtime="2026-09-18 21:00:00",
+    )
+
+
+def seed_quality_rows(app) -> None:
+    """A=模糊，B=正常，C=过曝。"""
+    app.quality_store.upsert_many(
+        [
+            quality_row("D:/Photos/2026/a.NEF", blur=60.0, contrast=40.0),
+            quality_row("D:/Photos/2026/b.NEF"),
+            quality_row("D:/Photos/2026/c.NEF", mean=230.0, blur=300.0),
+        ]
+    )
+    app._quality_revision += 1
+    app.refresh_results()
+
+
+def test_quality_checkboxes_exist(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    assert set(app.quality_vars) == set(FLAG_IDS)
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_quality_filter_and_or(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+    seed_quality_rows(app)
+
+    app.quality_vars["blurry"].set(True)
+    app._on_filter_changed()
+    assert row_names(app) == {"a.NEF"}
+
+    app.quality_vars["overexposed"].set(True)  # AND：既模糊又过曝
+    app._on_filter_changed()
+    assert row_names(app) == set()
+
+    app.and_mode.set(False)  # OR：模糊或过曝
+    app._on_filter_changed()
+    assert row_names(app) == {"a.NEF", "c.NEF"}
+
+    app.clear_filters()
+    assert row_names(app) == {"a.NEF", "b.NEF", "c.NEF"}
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_quality_column_and_detail(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+    seed_quality_rows(app)
+
+    row_values = {
+        app.result_tree.item(iid, "values")[0]: app.result_tree.item(iid, "values")
+        for iid in app.result_tree.get_children()
+    }
+    assert "模糊" in row_values["a.NEF"][7]
+    assert row_values["b.NEF"][7] == ""
+    assert "过曝" in row_values["c.NEF"][7]
+
+    iid = str(Path("D:/Photos/2026/a.NEF").resolve())
+    app.result_tree.selection_set(iid)
+    app._on_result_select()
+    root.update()
+
+    texts = []
+    for row_frame in app.quality_frame.winfo_children():
+        for label in row_frame.winfo_children():
+            texts.append(label.cget("text"))
+    assert any("模糊" in text or "清晰度" in text for text in texts)
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_analysis_worker_writes_quality(root, db_path: Path, tmp_path: Path) -> None:
+    pytest.importorskip("PIL.Image")
+    from image_maker import save_blurred_jpeg, save_sharp_jpeg
+
+    photo_dir = tmp_path / "analysis_photos"
+    photo_dir.mkdir()
+    save_sharp_jpeg(photo_dir / "sharp.JPG")
+    save_blurred_jpeg(photo_dir / "blurred.JPG")
+
+    app = PhotoClassifierApp(root, db_path)
+    app.db.add_folder(photo_dir)
+    app._scan_worker([photo_dir])
+    infos = app.db.find_photos_under([photo_dir])
+    assert len(infos) == 2
+
+    app._analyze_worker(infos)
+    final = None
+    while True:
+        message = app.analyze_queue.get_nowait()
+        if message[0] in ("done", "error"):
+            final = message
+            break
+    assert final is not None
+    kind, report = final
+    assert kind == "done"
+    assert report.analyzed_now == 2
+    assert report.failed == 0
+
+    app._quality_revision += 1
+    app.refresh_results()
+    assert report.flag_counts.get("blurry", 0) == 1
+    row_values = {
+        app.result_tree.item(iid, "values")[0]: app.result_tree.item(iid, "values")
+        for iid in app.result_tree.get_children()
+    }
+    assert "模糊" in row_values["blurred.JPG"][7]
+
+    app.db.close()
+    app.quality_store.close()
