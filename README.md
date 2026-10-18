@@ -43,7 +43,7 @@ post-processing software.
    Whatever EXIF and rule-based logic can solve, we solve without AI; visual
    recognition will be added later as needed.
 
-## Current Features (V1.5)
+## Current Features (V2.5)
 
 ### V1: Folder Scanning & Basic NEF Support ✅
 
@@ -55,7 +55,7 @@ post-processing software.
   part in photo analysis and never crash the program;
 - Scanning is completely read-only; no original file is ever touched.
 
-### V1.5: EXIF & Photo Information ✅ (current release)
+### V1.5: EXIF & Photo Information ✅
 
 - **Zero-dependency EXIF parser** (`src/exif_reader.py`): parses NEF (TIFF
   structure) and JPEG (APP1 segment) directly, reading —
@@ -97,6 +97,40 @@ post-processing software.
   shows "Rule matches" with reasons; a "only photos with GPS" filter is
   available.
 
+### V2.5: Image Quality Analysis ✅ (current release)
+
+The first stage that **reads pixels**. `analyze` stores measurements in the
+database, while verdicts are still derived live — changing a threshold never
+requires re-decoding an image.
+
+- **Pixel source**: NEF uses its **embedded JPEG preview** (IFD0 / SubIFD,
+  6048×4032 in practice); JPEG / PNG are decoded directly. **No RAW decoding**,
+  so libraw / rawpy is not needed;
+- **Six abilities**: blur, motion blur, overexposure, underexposure, black
+  frames, duplicate photos;
+- **Explainable**: every flag carries numbers, e.g.
+  `sharpness 116 < 120 (Laplacian variance, 512px)` or
+  `highlight clipping 21% ≥ 12%`;
+- **Duplicates**: exact (same size + a head/tail 256 KiB fingerprint first, full
+  SHA-256 only on collisions) and near (dHash ≤ 8 within a 10 s capture window);
+- **Timelapse / burst sequences**: long regular runs (gap ≤ 12 s, ≥ 20 frames,
+  ≥ 60 s) are recognised from capture rhythm; similar frames inside a sequence
+  are reported but **never flagged as duplicates** — a folder that contains such
+  a sequence is exempt by default (`--strict` disables this). This rule came out
+  of calibrating on real timelapse footage;
+- **Same-name RAW+JPEG is not a duplicate** (two formats of one photo, identical
+  dHash);
+- **CLI**: `analyze` (analysis + report + `--csv` export for calibration),
+  `quality` (statistics and flagged list), `dupes` (duplicate groups,
+  `--sequences` for sequences), `filter --quality` (shares AND/OR with rules);
+- **GUI**: six quality checkboxes in the filter panel, a "Quality" column in the
+  results, a "Quality analysis" block in the detail panel (sharpness, luminance,
+  clipping, duplicates and reasons), and a toolbar "Quality analysis" button
+  (background thread + progress + cancel + incremental);
+- **Optional dependency**: quality analysis needs Pillow
+  (`requirements-quality.txt`); without it, scanning, EXIF and rule-based
+  classification/filtering keep working unchanged.
+
 ### GUI Shell (GUI V1.5) ✅
 
 - **Folder library**: import multiple folders, tick the ones to scan, scan
@@ -106,15 +140,29 @@ post-processing software.
 - **Results list**: file name, type, capture time, camera, ISO, shutter, size;
 - **Detail panel**: full photo information (same fields as the database) +
   `Reveal in Explorer` and `Copy Path`;
+- **Quality analysis**: the "Quality analysis (V2.5)" checkboxes (blur / motion
+  blur / overexposed / underexposed / black frame / duplicate) share the same
+  AND/OR logic as auto tags; a "Quality" column, and a "Quality analysis" block
+  in the detail panel (sharpness, contrast, luminance, clipping, duplicate
+  group);
 - **Placeholders**: tag filtering (V3), parameter conditions (V4), export /
   import to Lightroom (V5) are drawn but disabled until their versions land;
+- Default window 1660×900; the left and right panels scroll with the mouse wheel
+  when their content is taller than the window;
 - Launch: the desktop shortcut (pointing at `run_gui.pyw`), or
   `python -m src.gui` / `pythonw run_gui.pyw`.
 
 ## Installation & Usage
 
-Requirements: Python 3.12+ (standard library only, no third-party
-dependencies).
+Requirements: Python 3.12+. Core features use the standard library only;
+**image quality analysis needs the optional Pillow**:
+
+```bash
+pip install -r requirements-quality.txt
+```
+
+Without Pillow, `analyze` prints installation guidance and everything else keeps
+working.
 
 ```bash
 # 1. Create and activate a virtual environment (Windows PowerShell)
@@ -139,6 +187,19 @@ python -m src.main filter --rules night,high_iso --explain
 # 7. Night OR telephoto; or only photos with GPS
 python -m src.main filter --rules night,telephoto --or
 python -m src.main filter --gps
+
+# 8. Analyse image quality (incremental; read-only)
+python -m src.main analyze
+
+# 9. Quality statistics; only blurry photos with reasons
+python -m src.main quality
+python -m src.main filter --quality blurry --explain
+
+# 10. Duplicate groups (with timelapse/burst sequences)
+python -m src.main dupes --sequences
+
+# 11. Create / update the desktop shortcut (Windows)
+python tools/install_shortcut.py
 ```
 
 > Note: the CLI currently prints reports in Chinese; localization is planned
@@ -162,6 +223,18 @@ plan):
   NEF：1
 照片信息数据库：data\photos.db（本次写入 9 条，合计 9 条）
 任务完成。
+```
+
+Actual `analyze` output (2026-10-19, a 1,375-file timelapse folder):
+
+```
+质量分析完成（候选 1,375 张）
+  本次分析：1,368 张（跳过：非照片 7）
+  预览来源：内嵌 JPEG 667 · 原图 701 · 无预览 0
+  耗时：81.0 秒（16.9 张/秒，6 线程）
+  模糊 38 · 运动模糊 2 · 过曝 0 · 欠曝 0 · 黑屏 0
+  重复：0 组（精确 0 / 近似 0，涉及 0 张）；延时/连拍序列 31 组（不标记为重复）
+  结果已写入：data\photos.db（photo_quality 表）
 ```
 
 `show` output for a single photo:
@@ -193,10 +266,13 @@ DSC_0001.NEF  [NEF]
 python -m pytest
 ```
 
-The suite contains 160 tests, all based on temporary files synthesized to the
-TIFF / EXIF / PNG specifications (see `tests/exif_maker.py`) — no real photos
-are needed and no local files are touched. The GUI tests build the real window
-off-screen without entering the main loop.
+The suite contains **233 tests**. Scanning, EXIF, rules, database and CLI tests
+use temporary files synthesized to the TIFF / EXIF / PNG specifications
+(`tests/exif_maker.py`); quality tests draw small images with Pillow
+(`tests/image_maker.py`) and cover NEF embedded previews, blur/exposure,
+duplicate grouping and timelapse-sequence exemption. GUI tests build the real
+window off-screen without entering the main loop. Without Pillow, the
+decode-dependent cases skip automatically and the rest still run.
 
 ## Project Structure
 
@@ -208,20 +284,34 @@ PhotoClassifier/
 │   ├── exif_reader.py   # V1.5: zero-dependency EXIF parser (NEF/JPEG/PNG)
 │   ├── database.py      # V1.5: SQLite photo information database (incl. folder library)
 │   ├── rules.py         # V2: EXIF rule engine (6 built-in rules, configurable)
+│   ├── quality.py       # V2.5: quality metrics + verdicts (pure, no Pillow)
+│   ├── preview.py       # V2.5: pixel source (NEF preview / JPEG / PNG; Pillow optional)
+│   ├── duplicates.py    # V2.5: exact/near duplicates + timelapse sequences (pure)
+│   ├── quality_store.py # V2.5: photo_quality table persistence
+│   ├── quality_scan.py  # V2.5: analysis pipeline (incremental / concurrent / hashing / report)
 │   ├── formatting.py    # shared display formatting (CLI / GUI / rules)
-│   ├── main.py          # CLI entry point (scan / show / stats / classify / filter)
-│   └── gui.py           # GUI: graphical shell (Tkinter, with rule filtering)
+│   ├── main.py          # CLI entry point (scan / show / stats / classify / filter / analyze / quality / dupes)
+│   └── gui.py           # GUI: graphical shell (Tkinter, rules + quality filtering)
 ├── tests/
 │   ├── test_scanner.py      # V1 scanner tests
 │   ├── test_exif_reader.py  # EXIF parsing tests (incl. corrupted-file tolerance)
 │   ├── test_database.py     # database read/write tests
 │   ├── test_rules.py        # rule engine tests (boundaries + performance baseline)
+│   ├── test_quality.py      # metric & verdict tests (pure-Python grayscale)
+│   ├── test_preview.py      # NEF preview / decoding / fault tolerance (needs Pillow)
+│   ├── test_duplicates.py   # exact / near duplicates / timelapse sequences
+│   ├── test_quality_store.py# quality table + schema migration tests
+│   ├── test_quality_cli.py  # analyze / quality / dupes / filter --quality tests
 │   ├── test_main.py         # CLI & end-to-end integration tests
-│   ├── test_gui.py          # GUI shell tests (incl. rule filtering)
-│   └── exif_maker.py        # helper to synthesize NEF/JPEG/PNG test files
-├── assets/              # application icon
+│   ├── test_gui.py          # GUI shell tests (incl. rule and quality filtering)
+│   ├── exif_maker.py        # helper to synthesize NEF/JPEG/PNG test files
+│   └── image_maker.py       # helper to draw test images (Pillow)
+├── tools/
+│   └── install_shortcut.py  # create/update the desktop shortcut (incl. icon)
+├── assets/              # application icon (logo, ico)
 ├── data/                # local data directory (gitignored; database default location)
 ├── run_gui.pyw          # GUI launcher (target of the desktop shortcut)
+├── requirements-quality.txt # optional dependency (Pillow, quality analysis only)
 ├── pytest.ini
 ├── README.md            # this file (English)
 └── README.zh-CN.md      # Chinese README
@@ -235,6 +325,10 @@ PhotoClassifier/
 | Database | SQLite (stdlib `sqlite3`) | Single file, zero configuration, sufficient; absolute-path primary key supports de-duplicated rescans |
 | Platform | Windows first | The real-world scenario for stage one; the code uses no platform-specific APIs |
 | AI | Optional & pluggable | EXIF + rules first; visual recognition (V3.5) will compare traditional CV / local models / cloud APIs |
+| Quality pixel source | NEF embedded JPEG preview; no RAW decoding | The preview is enough for sharpness, exposure and similarity, is an order of magnitude faster than full RAW decoding, and avoids binary dependencies such as libraw |
+| Quality storage | Store **measurements only**, derive verdicts live | Same pattern as V2 "rules are never stored": threshold changes need no pixel re-read; `photo_quality` is a separate table (zero migration risk) |
+| Image decoding | Pillow as an **optional dependency**, only in `preview.py` | Mature, wheel-only, supports JPEG `draft()` downscaling; the core works without it |
+| Duplicates | Exact (full hash) + near (dHash + time window) + sequence exemption | In real timelapse footage, similar consecutive frames are normal; same-name RAW+JPEG pairs are two formats of one photo |
 
 ## Roadmap
 
@@ -243,8 +337,8 @@ PhotoClassifier/
 | V0 | Project foundation (repo, venv, structure, README) | ✅ Done |
 | V1 | Folder scanning & basic NEF support (type detection, fault tolerance, report) | ✅ Done |
 | V1.5 | EXIF & photo information (parser, database, CLI) | ✅ Done |
-| V2 | Rule-based classification (night / high-ISO / slow shutter / telephoto / wide-angle / fast lens; CLI + GUI filtering) | ✅ Done (current) |
-| V2.5 | Image quality analysis (blur / exposure anomalies / duplicates — hints only, never auto-delete) | Planned |
+| V2 | Rule-based classification (night / high-ISO / slow shutter / telephoto / wide-angle / fast lens; CLI + GUI filtering) | ✅ Done |
+| V2.5 | Image quality analysis (blur / motion blur / exposure anomalies / black frames / duplicates / timelapse sequences; CLI + GUI, hints only, never auto-delete) | ✅ Done (current) |
 | V3 | Multi-tag system (#night #architecture …; one photo, many tags) | Planned |
 | V3.5 | Visual recognition (compare traditional CV / local models / AI APIs) | Planned |
 | V4 | Smart filtering (AND / OR combos of tags + EXIF conditions) | Planned |
@@ -254,6 +348,20 @@ PhotoClassifier/
 Future extensions: more RAW formats (CR3 / ARW / RAF / DNG / ORF / RW2), map
 view, timeline, camera & lens statistics, similar-photo clustering, batch
 renaming, and more.
+
+### Measured performance (2026-10-19, Nikon Z6III timelapse footage)
+
+| Item | Result |
+| --- | --- |
+| Data | 1,375 files (667 NEF + 701 JPEG + 7 videos), 1,368 photos, 17.9 GB |
+| First analysis | 81 s (6 workers, ~16.9 photos/s) |
+| Incremental re-run | 0.2 s (everything up to date, no re-decoding) |
+| Preview source | embedded JPEG 667 · full image 701 · failures 0 |
+| Flags | blur 38 · motion blur 2 · over/under-exposed 0 · black 0 · 0 duplicate groups · 31 sequences (1,292 photos) |
+
+> Manual spot checks confirmed the 38 blurry frames are real (one accidental
+> shot of a chair back; the rest clearly soft at slow shutter speeds), and the
+> timelapse frames were not misreported as duplicates.
 
 ## Original-Photo Safety Principles
 
@@ -268,4 +376,5 @@ The entire project must obey:
 ---
 
 *See the internal design document "PhotoClassifier 项目总体规划与开发路线"
-(PhotoClassifier Project Master Plan & Development Roadmap) for the full plan.*
+(PhotoClassifier Project Master Plan & Development Roadmap), plus the per-stage
+plans in `docs/v2-plan.md` and `docs/v2.5-plan.md`.*

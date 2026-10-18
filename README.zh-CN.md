@@ -31,7 +31,7 @@ Lightroom 等后期软件。
 5. **AI 是可插拔的增强，不是核心依赖。** 能用 EXIF 和规则解决的，不引入 AI；
    未来的视觉识别再按需加入。
 
-## 当前功能（V1.5）
+## 当前功能（V2.5）
 
 ### V1：文件扫描与 NEF 基础支持 ✅
 
@@ -40,7 +40,7 @@ Lightroom 等后期软件。
 - 视频与未知格式只记录文件信息，不参与照片分析，也不会导致程序崩溃；
 - 扫描完全只读，不改动任何原始文件。
 
-### V1.5：EXIF 与照片信息 ✅（当前版本）
+### V1.5：EXIF 与照片信息 ✅
 
 - **零依赖的 EXIF 解析器**（`src/exif_reader.py`）：直接解析 NEF（TIFF 结构）
   和 JPEG（APP1 段），读取——
@@ -65,8 +65,12 @@ Lightroom 等后期软件。
 - **结果列表**：文件名、类型、拍摄时间、相机、ISO、快门、大小；
 - **详情面板**：完整照片信息（与数据库字段一致）+
   「打开文件位置」「复制路径」；
+- **质量分析**：左侧「质量分析（V2.5）」复选框（模糊 / 运动模糊 / 过曝 /
+  欠曝 / 黑屏 / 重复）与自动标签共用 并且/或者；结果表「质量」列、
+  详情面板「质量分析」块（清晰度、对比度、亮度、高光/暗部截断、重复组）；
 - **占位控件**：标签筛选（V3）、参数条件（V4）、导出 / 导入到 Lightroom（V5）
   均已画出并禁用，随版本接入；
+- 窗口默认 1660×900；左右面板内容超出时可滚动（鼠标滚轮）；
 - 启动方式：桌面快捷方式（指向 `run_gui.pyw`），或
   `python -m src.gui` / `pythonw run_gui.pyw`。
 
@@ -86,9 +90,40 @@ Lightroom 等后期软件。
   结果列表新增「自动标签」列（chips）；详情面板显示「规则命中」原因；
   支持「有 GPS 坐标」筛选。
 
+### V2.5：图像质量分析 ✅（当前版本）
+
+项目**第一次读取像素**。`analyze` 时把画质测量写进数据库，判定仍然是实时的——
+改阈值不需要重新解码图片。
+
+- **像素来源**：NEF 取**内嵌的 JPEG 预览**（IFD0 / SubIFD，实测 6048×4032），
+  JPEG / PNG 直接解码；**不做 RAW 解码**，因此不需要 libraw / rawpy；
+- **6 项能力**：模糊、运动模糊、过曝、欠曝、黑屏、重复照片；
+- **可解释**：每个标记都带具体数值，例如
+  `清晰度 116 < 120（拉普拉斯方差，512px）`、`高光截断 21% ≥ 12%`；
+- **重复检测**：精确重复（同尺寸 + 首尾 256KiB 指纹先行筛选，撞车才整文件
+  SHA-256）+ 近似重复（dHash ≤ 8 且拍摄时间差 ≤ 10s）；
+- **延时 / 连拍序列**：按拍摄节奏识别（间隔 ≤ 12s、≥ 20 帧、≥ 60s）的长序列；
+  序列内的相似帧只报告、**不标记为重复**；含序列的文件夹默认同样豁免
+  （`--strict` 可关闭）。这是用真实延时素材校准出来的规则；
+- **同名 RAW+JPEG 不算重复**（同一张照片的两种格式，dHash 完全相同）；
+- **CLI**：`analyze`（分析 + 报告 + `--csv` 导出测量值用于校准）、
+  `quality`（统计与标记清单）、`dupes`（重复分组，`--sequences` 附带序列）、
+  `filter --quality`（与规则共用 AND/OR）；
+- **GUI**：筛选面板新增「质量分析」6 个复选框、结果列表新增「质量」列、
+  详情面板显示清晰度 / 亮度 / 截断 / 重复与原因、工具栏新增「质量分析」按钮
+  （后台线程 + 进度 + 可取消 + 增量）；
+- **可选依赖**：质量分析需要 Pillow（`requirements-quality.txt`）；没安装时
+  扫描、EXIF、规则分类与规则筛选**完全不受影响**。
+
 ## 安装与使用
 
-要求：Python 3.12+（仅标准库，无第三方依赖）。
+要求：Python 3.12+。核心功能只用标准库；**图像质量分析需要可选的 Pillow**：
+
+```bash
+pip install -r requirements-quality.txt
+```
+
+不安装 Pillow 时，`analyze` 会给出安装提示，其余功能照常可用。
 
 ```bash
 # 1. 创建并激活虚拟环境（Windows PowerShell）
@@ -113,6 +148,19 @@ python -m src.main filter --rules night,high_iso --explain
 # 7. 夜景 或 长焦；或只看有 GPS 的照片
 python -m src.main filter --rules night,telephoto --or
 python -m src.main filter --gps
+
+# 8. 分析图像质量（增量；只读，不改动任何照片）
+python -m src.main analyze
+
+# 9. 质量统计；只看模糊并展开原因
+python -m src.main quality
+python -m src.main filter --quality blurry --explain
+
+# 10. 重复照片分组（附带延时/连拍序列）
+python -m src.main dupes --sequences
+
+# 11. 安装 / 更新桌面快捷方式（Windows）
+python tools/install_shortcut.py
 ```
 
 `scan` 的输出报告（对应规划文档的容错设计）：
@@ -132,6 +180,18 @@ python -m src.main filter --gps
   NEF：1
 照片信息数据库：data\photos.db（本次写入 9 条，合计 9 条）
 任务完成。
+```
+
+`analyze` 的真实输出（2026-10-19，1,375 个文件的延时素材）：
+
+```
+质量分析完成（候选 1,375 张）
+  本次分析：1,368 张（跳过：非照片 7）
+  预览来源：内嵌 JPEG 667 · 原图 701 · 无预览 0
+  耗时：81.0 秒（16.9 张/秒，6 线程）
+  模糊 38 · 运动模糊 2 · 过曝 0 · 欠曝 0 · 黑屏 0
+  重复：0 组（精确 0 / 近似 0，涉及 0 张）；延时/连拍序列 31 组（不标记为重复）
+  结果已写入：data\photos.db（photo_quality 表）
 ```
 
 `show` 单张照片的输出示例：
@@ -162,9 +222,11 @@ DSC_0001.NEF  [NEF]
 python -m pytest
 ```
 
-测试共 160 个，全部使用按 TIFF / EXIF / PNG 规范合成的临时文件（见
-`tests/exif_maker.py`），不依赖任何真实照片，也不会触碰本机文件；GUI 测试
-在后台构建真实窗口（不进入主循环、不弹窗）。
+测试共 **233 个**。扫描、EXIF、规则、数据库、CLI 测试全部使用按
+TIFF / EXIF / PNG 规范合成的临时文件（`tests/exif_maker.py`）；质量分析测试用
+Pillow 现画的小图（`tests/image_maker.py`），并覆盖 NEF 内嵌预览、模糊/曝光/
+重复分组与延时序列豁免；GUI 测试在后台构建真实窗口（不进入主循环、不弹窗）。
+没有安装 Pillow 时，依赖解码的用例会自动跳过，其余测试照常运行。
 
 ## 项目结构
 
@@ -176,20 +238,34 @@ PhotoClassifier/
 │   ├── exif_reader.py   # V1.5：零依赖 EXIF 解析器（NEF/JPEG/PNG）
 │   ├── database.py      # V1.5：SQLite 照片信息数据库（含文件夹库）
 │   ├── rules.py         # V2：EXIF 规则分类引擎（6 条内置规则，可配置）
+│   ├── quality.py       # V2.5：质量度量与判定（纯函数，不依赖 Pillow）
+│   ├── preview.py       # V2.5：像素来源（NEF 内嵌预览 / JPEG / PNG，Pillow 可选）
+│   ├── duplicates.py    # V2.5：精确/近似重复 + 延时序列识别（纯函数）
+│   ├── quality_store.py # V2.5：photo_quality 表读写
+│   ├── quality_scan.py  # V2.5：分析流程编排（增量 / 并发 / 哈希 / 报告）
 │   ├── formatting.py    # 通用显示格式化（CLI / GUI / 规则共用）
-│   ├── main.py          # CLI 入口（scan / show / stats / classify / filter）
-│   └── gui.py           # GUI：图形界面外壳（Tkinter，含规则筛选）
+│   ├── main.py          # CLI 入口（scan / show / stats / classify / filter / analyze / quality / dupes）
+│   └── gui.py           # GUI：图形界面外壳（Tkinter，含规则与质量筛选）
 ├── tests/
 │   ├── test_scanner.py      # V1 扫描器测试
 │   ├── test_exif_reader.py  # EXIF 解析测试（含损坏文件容错）
 │   ├── test_database.py     # 数据库读写测试
 │   ├── test_rules.py        # 规则引擎测试（含边界与性能基线）
+│   ├── test_quality.py      # 度量与判定测试（纯 Python 灰度数组）
+│   ├── test_preview.py      # NEF 内嵌预览 / 解码 / 容错测试（需 Pillow）
+│   ├── test_duplicates.py   # 精确 / 近似重复 / 延时序列测试
+│   ├── test_quality_store.py# 质量表读写与 schema 迁移测试
+│   ├── test_quality_cli.py  # analyze / quality / dupes / filter --quality 测试
 │   ├── test_main.py         # CLI 与整体流程集成测试
-│   ├── test_gui.py          # GUI 外壳测试（含规则筛选）
-│   └── exif_maker.py        # 合成 NEF/JPEG/PNG 测试文件的辅助模块
-├── assets/              # 应用图标
+│   ├── test_gui.py          # GUI 外壳测试（含规则与质量筛选）
+│   ├── exif_maker.py        # 合成 NEF/JPEG/PNG 测试文件的辅助模块
+│   └── image_maker.py       # 合成带像素的测试图片（Pillow）
+├── tools/
+│   └── install_shortcut.py  # 创建/更新桌面快捷方式（含图标）
+├── assets/              # 应用图标（logo、ico）
 ├── data/                # 本地数据目录（gitignore，数据库默认位置）
 ├── run_gui.pyw          # GUI 启动器（桌面快捷方式指向此文件）
+├── requirements-quality.txt # 可选依赖（Pillow，仅质量分析需要）
 ├── pytest.ini
 ├── README.md            # 英文版（默认）
 └── README.zh-CN.md      # 中文版
@@ -203,6 +279,10 @@ PhotoClassifier/
 | 数据库 | SQLite（标准库 `sqlite3`） | 单文件、零配置、够用；以绝对路径为主键支持重复扫描去重 |
 | 平台 | Windows 优先 | 第一阶段真实使用场景；代码不使用平台专属 API |
 | AI | 可选、可插拔 | EXIF + 规则优先；视觉识别（V3.5）时再评估传统 CV / 本地模型 / 云端 API |
+| 质量分析像素来源 | NEF 内嵌 JPEG 预览，不做 RAW 解码 | 预览足以判断清晰度/曝光/重复，速度比完整 RAW 解码快一个数量级，也不引入 libraw 这类二进制依赖 |
+| 质量结果存储 | 只存**测量值**，判定实时计算 | 与 V2"规则不落库"同构：改阈值不用重算像素；`photo_quality` 表独立于 `photos`，零迁移风险 |
+| 图像解码 | Pillow 作为**可选依赖**，只出现在 `preview.py` | 成熟、纯 wheel、支持 JPEG `draft()` 降采样；缺失时核心功能不受影响 |
+| 重复照片 | 精确（整文件哈希）+ 近似（dHash + 时间窗）+ 序列豁免 | 真实延时素材里"相似帧"是正常拍摄节奏，不能当重复；同名 RAW+JPEG 也豁免 |
 
 ## 开发路线图
 
@@ -211,8 +291,8 @@ PhotoClassifier/
 | V0 | 项目基础（仓库、虚拟环境、目录结构、README） | ✅ 完成 |
 | V1 | 文件扫描与 NEF 基础支持（类型识别、容错、报告） | ✅ 完成 |
 | V1.5 | EXIF 与照片信息（解析器、数据库、CLI） | ✅ 完成 |
-| V2 | 规则分类（夜景 / 高感 / 慢门 / 长焦 / 广角 / 大光圈；CLI + GUI 筛选） | ✅ 完成（当前） |
-| V2.5 | 图像质量分析（模糊 / 曝光异常 / 重复照片，仅提示不删除） | 计划中 |
+| V2 | 规则分类（夜景 / 高感 / 慢门 / 长焦 / 广角 / 大光圈；CLI + GUI 筛选） | ✅ 完成 |
+| V2.5 | 图像质量分析（模糊 / 运动模糊 / 曝光异常 / 黑屏 / 重复 / 延时序列；CLI + GUI，仅提示不删除） | ✅ 完成（当前） |
 | V3 | 多标签系统（#夜景 #建筑 …，一张照片多个标签） | 计划中 |
 | V3.5 | 视觉识别（比较传统 CV / 本地模型 / AI API） | 计划中 |
 | V4 | 智能筛选（标签 + EXIF 条件的 AND / OR 组合） | 计划中 |
@@ -221,6 +301,19 @@ PhotoClassifier/
 
 未来扩展：更多 RAW 格式（CR3 / ARW / RAF / DNG / ORF / RW2）、地图视图、时间线、
 相机镜头统计、相似照片聚类、批量重命名等。
+
+### 性能实测（2026-10-19，Nikon Z6III 延时素材）
+
+| 项目 | 结果 |
+| --- | --- |
+| 数据量 | 1,375 个文件（667 NEF + 701 JPEG + 7 视频），1,368 张照片、17.9 GB |
+| 首次分析 | 81 秒（6 线程，约 16.9 张/秒） |
+| 增量重跑 | 0.2 秒（已是最新，不重复解码） |
+| 预览来源 | 内嵌 JPEG 667 · 原图 701 · 失败 0 |
+| 命中 | 模糊 38 · 运动模糊 2 · 过曝/欠曝/黑屏 0 · 重复 0 组 · 序列 31 组（1,292 张） |
+
+> 模糊 38 张经人工抽查确认是真实问题（其中一张是对着椅背的误触、其余是
+> 慢门下明显发虚的帧）；延时序列没有被误报成"重复照片"。
 
 ## 原始照片安全原则
 
@@ -233,4 +326,4 @@ PhotoClassifier/
 
 ---
 
-*项目总体规划与开发路线详见内部设计文档《PhotoClassifier 项目总体规划与开发路线》。*
+*项目总体规划与开发路线详见内部设计文档《PhotoClassifier 项目总体规划与开发路线》，及各阶段方案：`docs/v2-plan.zh-CN.md`、`docs/v2.5-plan.zh-CN.md`。*

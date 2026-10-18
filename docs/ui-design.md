@@ -108,6 +108,14 @@ dependency so the core stays dependency-free.
 
 ## 8. Changelog
 
+- r5 (2026-10-19): V2.5 wiring — six "Quality analysis" checkboxes in the left
+  panel (sharing AND/OR with auto tags); a "Quality" column in the result table;
+  a "Quality analysis" block in the detail panel (sharpness, contrast,
+  luminance, clipping, duplicate group) placed before "Rule matches"; a
+  "Quality analysis" toolbar button (background thread + progress + cancel +
+  incremental); default window enlarged to 1660×900, left/right panels scroll
+  when content overflows, and the action buttons are pinned to the bottom of
+  the detail panel.
 - r4 (2026-10-18): filter panel wired to the V2 rule engine (6 EXIF rules,
   live filtering, AND/OR, GPS-only, clear); results gain an "Auto tags"
   column; the detail panel lists rule-match reasons.
