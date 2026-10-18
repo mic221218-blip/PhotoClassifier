@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import queue
-import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -45,6 +44,7 @@ from src.quality_scan import AnalyzeOptions, analyze_photos, rebuild_duplicates
 from src.quality_store import QualityStore
 from src.rules import RULE_REGISTRY, RuleEngine, RuleMatch
 from src.scanner import scan_folder
+from src.shell import open_in_explorer
 
 #: 项目根目录（src/ 的上一级）。数据库默认位置与其解耦于当前工作目录。
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -838,6 +838,10 @@ class PhotoClassifierApp:
         else:
             self.checked_folders.add(str(iid))
         self.refresh_library()
+        # 点击同时选中该行：这样「移除」按钮知道要移除哪一个（之前只切换勾选状态）
+        if iid in self.library_tree.get_children():
+            self.library_tree.selection_set(iid)
+            self.library_tree.focus(iid)
         self.refresh_results()
 
     def add_folder_dialog(self) -> None:
@@ -854,7 +858,10 @@ class PhotoClassifierApp:
     def remove_selected_folder(self) -> None:
         selection = self.library_tree.selection()
         if not selection:
-            messagebox.showinfo("移除文件夹", "请先在文件夹库中选择一个文件夹。")
+            focused = self.library_tree.focus()
+            selection = (focused,) if focused else ()
+        if not selection:
+            messagebox.showinfo("移除文件夹", "请先在文件夹库中点击选择一个文件夹。")
             return
         folder = selection[0]
         if not messagebox.askyesno(
@@ -996,7 +1003,17 @@ class PhotoClassifierApp:
         if self.current is None:
             return
         target = self.current.path
-        subprocess.Popen(["explorer", f'/select,"{target}"'])
+        ok, error = open_in_explorer(target)
+        if ok:
+            self.status_left.config(text=f"已在资源管理器中定位：{target.name}")
+            return
+        # 失败时不弹系统错误框：复制路径，让用户手动粘贴
+        self.root.clipboard_clear()
+        self.root.clipboard_append(str(target))
+        messagebox.showwarning(
+            "打开文件位置",
+            f"{error}\n\n路径已复制到剪贴板，可以粘贴到资源管理器地址栏。",
+        )
 
     def copy_selected_path(self) -> None:
         if self.current is None:

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import tkinter as tk
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import src.gui as gui
 from src.gui import PhotoClassifierApp
 from src.quality import ANALYZER_VERSION, FLAG_IDS, QualityMeasurement
 
@@ -377,5 +379,75 @@ def test_analysis_worker_writes_quality(root, db_path: Path, tmp_path: Path) -> 
     }
     assert "模糊" in row_values["blurred.JPG"][7]
 
+    app.db.close()
+    app.quality_store.close()
+
+
+# --------------------------------------------------------------------------- #
+# 文件夹库选择 / 打开文件位置（bugfix）
+# --------------------------------------------------------------------------- #
+
+
+def test_clicking_library_row_selects_it(root, db_path: Path, monkeypatch) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    app.db.add_folder("D:/Photos/2026")
+    app.refresh_library()
+    item = app.library_tree.get_children()[0]
+
+    monkeypatch.setattr(app.library_tree, "identify_row", lambda _y: item)
+    app._on_library_click(SimpleNamespace(y=0))
+
+    assert app.library_tree.selection() == (item,)
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_remove_selected_folder_works_after_click(root, db_path: Path, monkeypatch) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    app.db.add_folder("D:/Photos/2026")
+    app.refresh_library()
+    item = app.library_tree.get_children()[0]
+
+    monkeypatch.setattr(app.library_tree, "identify_row", lambda _y: item)
+    app._on_library_click(SimpleNamespace(y=0))
+    assert item in app.checked_folders
+
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    app.remove_selected_folder()
+
+    assert app.db.list_folders() == []
+    assert item not in app.checked_folders
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_reveal_uses_shell_helper(root, db_path: Path, monkeypatch) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    app.current = make_info(Path("D:/Photos/2026/a.NEF"))
+    calls = []
+    monkeypatch.setattr(
+        gui, "open_in_explorer", lambda path: (calls.append(path), (True, None))[1]
+    )
+
+    app.reveal_selected()
+
+    assert calls == [app.current.path]
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_reveal_failure_copies_path_and_warns(root, db_path: Path, monkeypatch) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    app.current = make_info(Path("D:/Photos/2026/a.NEF"))
+    warnings = []
+    monkeypatch.setattr(gui, "open_in_explorer", lambda path: (False, "系统拒绝打开文件位置"))
+    monkeypatch.setattr(
+        gui.messagebox, "showwarning", lambda *args, **kwargs: warnings.append(args)
+    )
+
+    app.reveal_selected()
+
+    assert app.root.clipboard_get() == str(app.current.path)
+    assert warnings and "系统拒绝" in warnings[0][1]
     app.db.close()
     app.quality_store.close()
