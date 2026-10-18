@@ -1,0 +1,7 @@
+# PhotoClassifier V2.5 图像质量分析的可选依赖
+#
+# 只有 `analyze` 命令和 GUI 的「质量分析」需要它；
+# 不安装时扫描、EXIF、规则分类、规则筛选仍然完全可用。
+#
+# 安装：pip install -r requirements-quality.txt
+pillow>=10.0,<13

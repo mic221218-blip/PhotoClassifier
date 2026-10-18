@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,22 @@ from src.photo_info import (
     EXIF_SKIPPED,
     PhotoInfo,
 )
+from src.preview import PillowMissing, is_supported
+from src.quality import (
+    FLAG_IDS,
+    FLAG_LABELS,
+    QualityConfig,
+    QualityEngine,
+    QualityFlag,
+    QualityMeasurement,
+)
+from src.quality_scan import (
+    AnalysisReport,
+    AnalyzeOptions,
+    analyze_photos,
+    rebuild_duplicates,
+)
+from src.quality_store import QualityStore
 from src.rules import RuleEngine, RuleMatch
 from src.scanner import (
     CATEGORY_JPEG,
@@ -319,6 +336,254 @@ def _parse_rule_ids(raw: str, engine: RuleEngine) -> list[str]:
     return requested
 
 
+def _parse_quality_ids(raw: str) -> list[str]:
+    """解析 --quality / --flags 参数（逗号分隔的标记 id）。"""
+    requested = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    unknown = [flag_id for flag_id in requested if flag_id not in FLAG_IDS]
+    if unknown:
+        raise SystemExit(
+            f"未知质量标记 {', '.join(unknown)}；可用标记：" + ", ".join(FLAG_IDS)
+        )
+    return requested
+
+
+# --------------------------------------------------------------------------- #
+# 质量分析（V2.5）
+# --------------------------------------------------------------------------- #
+
+
+def format_analyze_report(
+    report: AnalysisReport, db_path: str | Path, *, workers: int = 4
+) -> str:
+    """`analyze` 命令的报告。"""
+    skipped_parts: list[str] = []
+    if report.skipped:
+        skipped_parts.append(f"非照片 {report.skipped:,}")
+    if report.already:
+        skipped_parts.append(f"已是最新 {report.already:,}")
+    skipped_text = "，".join(skipped_parts) if skipped_parts else "无"
+
+    lines = [f"质量分析完成（候选 {report.considered:,} 张）"]
+    lines.append(f"  本次分析：{report.analyzed_now:,} 张（跳过：{skipped_text}）")
+    lines.append(
+        f"  预览来源：内嵌 JPEG {report.embedded:,} · "
+        f"原图 {report.full_image:,} · 无预览 {report.no_preview:,}"
+    )
+    if report.analyzed_now:
+        lines.append(
+            f"  耗时：{report.elapsed:.1f} 秒（{report.rate:.1f} 张/秒，{workers} 线程）"
+        )
+    else:
+        lines.append(f"  耗时：{report.elapsed:.1f} 秒（没有需要分析的照片）")
+    if report.cancelled:
+        lines.append("  已取消：只保留已完成的部分（再次运行会继续增量分析）")
+
+    counts = report.flag_counts
+    flag_text = " · ".join(
+        f"{FLAG_LABELS[flag_id]} {counts.get(flag_id, 0):,}"
+        for flag_id in FLAG_IDS
+        if flag_id != "duplicate"
+    )
+    if flag_text:
+        lines.append(f"  {flag_text}")
+
+    duplicate = (
+        f"  重复：{report.duplicate_groups:,} 组"
+        f"（精确 {report.exact_groups:,} / 近似 {report.near_groups:,}，"
+        f"涉及 {report.duplicate_photos:,} 张）"
+    )
+    if report.sequence_groups:
+        duplicate += f"；延时/连拍序列 {report.sequence_groups:,} 组（不标记为重复）"
+    lines.append(duplicate)
+
+    if report.failed:
+        lines.append(f"  读取失败：{report.failed:,} 张（详见 quality 输出）")
+    lines.append(f"  结果已写入：{Path(db_path)}（photo_quality 表）")
+    return "\n".join(lines)
+
+
+def write_quality_csv(db_path: str | Path, out_path: str | Path) -> int:
+    """把测量值导出成 CSV（用于人工校准阈值）。"""
+    fields = [
+        "path",
+        "preview_source",
+        "preview_width",
+        "preview_height",
+        "blur_score",
+        "contrast",
+        "anisotropy",
+        "mean_lum",
+        "std_lum",
+        "clip_low_frac",
+        "clip_high_frac",
+        "dhash",
+        "error",
+    ]
+    written = 0
+    with QualityStore.open(db_path) as store, open(
+        out_path, "w", encoding="utf-8-sig", newline=""
+    ) as handle:
+        writer = csv.writer(handle)
+        writer.writerow(fields)
+        for measurement in store.iter_measurements():
+            writer.writerow([getattr(measurement, field) for field in fields])
+            written += 1
+    return written
+
+
+def _quality_context(db_path: str | Path):
+    """加载（照片, 测量值, 重复分组, 质量引擎）——报告类命令共用。"""
+    database = PhotoDatabase.open(db_path)
+    photos = list(database.iter_photos())
+    store = QualityStore.open(db_path)
+    measurements = list(store.iter_measurements())
+    duplicates = rebuild_duplicates(store, photos)
+    return database, store, photos, measurements, duplicates
+
+
+def format_quality_report(
+    db_path: str | Path,
+    *,
+    flag_ids: list[str] | None = None,
+    explain: bool = False,
+    limit: int = 30,
+) -> str:
+    """`quality` 命令的报告：统计 + 标记清单。"""
+    selected = set(flag_ids or FLAG_IDS)
+    engine = QualityEngine()
+    database, store, photos, measurements, duplicates = _quality_context(db_path)
+    try:
+        infos_by_path = {str(info.path.resolve()): info for info in photos}
+        counts = {flag_id: 0 for flag_id in FLAG_IDS}
+        rows: list[tuple[QualityMeasurement, list[QualityFlag]]] = []
+        for measurement in measurements:
+            info = infos_by_path.get(measurement.path)
+            flags = engine.flags(measurement, info)
+            reason = duplicates.flag_reason(measurement.path)
+            if reason:
+                flags.append(QualityFlag("duplicate", FLAG_LABELS["duplicate"], reason))
+            for flag in flags:
+                counts[flag.flag_id] = counts.get(flag.flag_id, 0) + 1
+            chosen = [flag for flag in flags if flag.flag_id in selected]
+            if chosen:
+                rows.append((measurement, chosen))
+        stats = store.stats()
+    finally:
+        store.close()
+        database.close()
+
+    analyzable = sum(1 for info in photos if is_supported(info.category))
+    pending = max(0, analyzable - len(measurements))
+    lines = [
+        f"质量统计（照片 {len(photos):,} 张，已分析 {len(measurements):,} 张，"
+        f"未分析 {pending:,} 张）"
+    ]
+    lines.append(
+        f"  预览来源：内嵌 JPEG {stats.embedded:,} · 原图 {stats.full_image:,} · "
+        f"无预览 {stats.no_preview:,}"
+    )
+    for flag_id in FLAG_IDS:
+        lines.append(
+            f"  {FLAG_LABELS[flag_id]}（{flag_id}）：{counts.get(flag_id, 0):,} 张"
+            f"（{engine.describe(flag_id)}）"
+        )
+    if duplicates.groups:
+        lines.append(
+            f"  重复分组：{len(duplicates.groups):,} 组，涉及 {duplicates.flagged_count:,} 张"
+        )
+
+    if pending:
+        lines.append(f"提示：还有 {pending:,} 张没有分析，先运行 `analyze`。")
+
+    if not rows:
+        lines.append("（没有匹配的标记）")
+        return "\n".join(lines)
+
+    lines.append(f"标记清单（{len(rows):,} 张，最多显示 {limit} 张）：")
+    for measurement, chosen in rows[:limit]:
+        name = Path(measurement.path).name
+        if explain:
+            detail = "；".join(f"{flag.label}：{flag.reason}" for flag in chosen)
+        else:
+            detail = " · ".join(flag.label for flag in chosen)
+        lines.append(f"  {name}  {detail}")
+    if len(rows) > limit:
+        lines.append(f"  ……以及另外 {len(rows) - limit:,} 张（用 --limit 调整）")
+    return "\n".join(lines)
+
+
+def _span_text(best_seconds: float | None, seconds: float | None) -> str:
+    if best_seconds is None or seconds is None:
+        return ""
+    delta = abs(seconds - best_seconds)
+    if delta < 1:
+        return "同一秒"
+    if delta < 60:
+        return f"相差 {delta:.0f}s"
+    return f"相差 {delta / 60:.1f} 分钟"
+
+
+def format_dupes_report(
+    db_path: str | Path,
+    *,
+    config: QualityConfig | None = None,
+    limit: int = 50,
+    show_sequences: bool = False,
+) -> str:
+    """`dupes` 命令的报告：重复分组 + 建议保留的排序。"""
+    cfg = config or QualityConfig()
+    with PhotoDatabase.open(db_path) as database:
+        photos = list(database.iter_photos())
+        with QualityStore.open(db_path) as store:
+            duplicates = rebuild_duplicates(store, photos, cfg)
+
+    groups = duplicates.groups
+    lines: list[str] = []
+    exact = sum(1 for group in groups if group.kind == "exact")
+    near = len(groups) - exact
+    lines.append(
+        f"重复照片：{len(groups):,} 组（精确 {exact:,} / 近似 {near:,}，"
+        f"涉及 {duplicates.flagged_count:,} 张）"
+    )
+    if duplicates.sequences:
+        lines.append(
+            f"延时/连拍序列：{len(duplicates.sequences):,} 组（"
+            f"{sum(group.size for group in duplicates.sequences):,} 张），不标记为重复"
+        )
+
+    if not groups:
+        lines.append("（没有发现重复照片）")
+    for index, group in enumerate(groups[:limit], start=1):
+        best = group.best
+        header = f"第 {index} 组（{group.kind_label}，{group.size} 张"
+        if group.kind == "near" and group.distance is not None:
+            header += f"，dHash 距离 {group.distance}"
+        header += "）"
+        lines.append(header)
+        for member in group.members:
+            sharpness = f"{member.blur_score:.0f}" if member.blur_score is not None else "—"
+            prefix = "[建议保留]" if member is best else "          "
+            extra = ""
+            if member is not best:
+                span = _span_text(best.timestamp, member.timestamp)
+                if span:
+                    extra = f"   {span}"
+            lines.append(f"  {prefix} 清晰度 {sharpness}  {member.name}{extra}")
+    if len(groups) > limit:
+        lines.append(f"……以及另外 {len(groups) - limit:,} 组（用 --limit 调整）")
+
+    if show_sequences and duplicates.sequences:
+        lines.append("")
+        lines.append("延时/连拍序列（仅供参考，不计入重复）：")
+        for index, group in enumerate(duplicates.sequences[:limit], start=1):
+            span = group.span_seconds or 0
+            lines.append(
+                f"  序列 {index}：{group.size:,} 张，跨度 {span / 60:.1f} 分钟，"
+                f"起始 {Path(group.best.path).name}"
+            )
+    return "\n".join(lines)
+
+
 def run_filter(
     db_path: str | Path,
     rule_ids: list[str] | None,
@@ -326,28 +591,48 @@ def run_filter(
     use_and: bool = True,
     gps_only: bool = False,
     limit: int = 0,
-) -> list[tuple[PhotoInfo, list[RuleMatch]]]:
-    """按规则筛选照片，返回 (照片, 命中列表) 的列表。"""
+    quality_ids: list[str] | None = None,
+    strict: bool = False,
+) -> list[tuple[PhotoInfo, list[RuleMatch], list[QualityFlag]]]:
+    """按规则与质量标记筛选照片，返回 (照片, 规则命中, 质量标记) 的列表。"""
     engine = RuleEngine()
-    matched: list[tuple[PhotoInfo, list[RuleMatch]]] = []
+    quality_engine = QualityEngine()
+    duplicate_config = QualityConfig()
+    if strict:
+        duplicate_config = duplicate_config.with_config(sequence_folder_mode=False)
+    selected = set(rule_ids or []) | set(quality_ids or [])
+    matched: list[tuple[PhotoInfo, list[RuleMatch], list[QualityFlag]]] = []
 
     with PhotoDatabase.open(db_path) as database:
         photos = list(database.iter_photos())
+        with QualityStore.open(db_path) as store:
+            measurements = {item.path: item for item in store.iter_measurements()}
+            duplicates = rebuild_duplicates(store, photos, duplicate_config)
 
     for info in photos:
         if gps_only and not info.has_gps:
             continue
         matches = engine.evaluate(info)
-        if rule_ids:
-            hit_ids = {match.rule_id for match in matches}
-            selected = set(rule_ids)
-            ok = selected.issubset(hit_ids) if use_and else bool(selected & hit_ids)
+        hits = {match.rule_id for match in matches}
+
+        quality_flags: list[QualityFlag] = []
+        measurement = measurements.get(str(info.path.resolve()))
+        if measurement is not None and measurement.analyzed:
+            quality_flags = quality_engine.flags(measurement, info)
+        reason = duplicates.flag_reason(info.path)
+        if reason:
+            quality_flags.append(QualityFlag("duplicate", FLAG_LABELS["duplicate"], reason))
+        hits |= {flag.flag_id for flag in quality_flags}
+
+        if selected:
+            ok = selected.issubset(hits) if use_and else bool(selected & hits)
             if not ok:
                 continue
         elif not gps_only:
-            # 既没有规则也没有 GPS 条件：调用方应提前报错，这里防御性返回空
+            # 既没有规则、也没有质量条件和 GPS：调用方应提前报错
             return []
-        matched.append((info, matches))
+
+        matched.append((info, matches, quality_flags))
 
     if limit > 0:
         matched = matched[:limit]
@@ -362,7 +647,7 @@ def run_filter(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="photoclassifier",
-        description="PhotoClassifier：面向摄影工作流的 RAW 照片整理与筛选工具（当前版本 V1.5）",
+        description="PhotoClassifier：面向摄影工作流的 RAW 照片整理与筛选工具（当前版本 V2.5）",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -385,17 +670,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
     classify_parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
 
-    filter_parser = subparsers.add_parser("filter", help="按规则筛选照片（输出匹配文件）")
+    filter_parser = subparsers.add_parser("filter", help="按规则 / 质量标记筛选照片（输出匹配文件）")
     filter_parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
     filter_parser.add_argument(
         "--rules", default="", help="逗号分隔的规则，如 night,high_iso（见 classify）"
     )
     filter_parser.add_argument(
-        "--or", dest="or_", action="store_true", help="规则之间用 OR（默认 AND）"
+        "--quality",
+        default="",
+        help="逗号分隔的质量标记，如 blurry,duplicate（见 quality）",
+    )
+    filter_parser.add_argument(
+        "--or", dest="or_", action="store_true", help="条件之间用 OR（默认 AND）"
     )
     filter_parser.add_argument("--gps", action="store_true", help="只看有 GPS 坐标的照片")
     filter_parser.add_argument("--limit", type=int, default=0, help="最多输出多少条（0 = 全部）")
     filter_parser.add_argument("--explain", action="store_true", help="输出命中原因")
+    filter_parser.add_argument(
+        "--strict", action="store_true", help="严格重复判定（忽略延时/连拍序列豁免）"
+    )
+
+    analyze_parser = subparsers.add_parser(
+        "analyze", help="分析图像质量（模糊 / 曝光 / 重复）并写入数据库"
+    )
+    analyze_parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
+    analyze_parser.add_argument("--folder", default="", help="只分析该文件夹（含子文件夹）")
+    analyze_parser.add_argument("--force", action="store_true", help="忽略缓存，全部重新分析")
+    analyze_parser.add_argument("--workers", type=int, default=4, help="并行线程数（默认 4）")
+    analyze_parser.add_argument("--limit", type=int, default=0, help="最多分析多少张（0 = 全部）")
+    analyze_parser.add_argument("--csv", default="", help="把测量值导出为 CSV（校准用）")
+
+    quality_parser = subparsers.add_parser("quality", help="查看质量统计与标记清单")
+    quality_parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
+    quality_parser.add_argument("--flags", default="", help="只看这些标记（逗号分隔）")
+    quality_parser.add_argument("--explain", action="store_true", help="输出命中原因")
+    quality_parser.add_argument("--limit", type=int, default=30, help="最多列出多少张（默认 30）")
+
+    dupes_parser = subparsers.add_parser("dupes", help="查看重复照片分组")
+    dupes_parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
+    dupes_parser.add_argument("--distance", type=int, default=None, help="dHash 距离上限（默认 8）")
+    dupes_parser.add_argument("--window", type=float, default=None, help="时间窗秒数（默认 10）")
+    dupes_parser.add_argument("--limit", type=int, default=50, help="最多显示多少组（默认 50）")
+    dupes_parser.add_argument(
+        "--sequences", action="store_true", help="同时列出延时/连拍序列"
+    )
+    dupes_parser.add_argument(
+        "--strict", action="store_true", help="严格模式：延时文件夹里的相似照片也按重复处理"
+    )
 
     return parser
 
@@ -441,29 +762,115 @@ def main(argv: list[str] | None = None) -> int:
         print(format_classify_report(args.db))
         return 0
 
+    if args.command == "analyze":
+        folder = args.folder or ""
+        try:
+            with PhotoDatabase.open(args.db) as database:
+                infos = (
+                    database.find_photos_under([folder])
+                    if folder
+                    else list(database.iter_photos())
+                )
+                with QualityStore.open(args.db) as store:
+                    report = analyze_photos(
+                        infos,
+                        store,
+                        options=AnalyzeOptions(
+                            workers=max(1, args.workers),
+                            force=args.force,
+                            limit=max(0, args.limit),
+                        ),
+                        is_cancelled=None,
+                    )
+        except PillowMissing as exc:
+            print(str(exc))
+            return 3
+
+        print(format_analyze_report(report, args.db, workers=max(1, args.workers)))
+        if args.csv:
+            written = write_quality_csv(args.db, args.csv)
+            print(f"测量值已导出：{args.csv}（{written:,} 条）")
+        if report.considered == 0:
+            print("（数据库里没有照片记录，先运行 scan）")
+            return 1
+        return 0
+
+    if args.command == "quality":
+        flag_ids = _parse_quality_ids(args.flags) if args.flags else None
+        with PhotoDatabase.open(args.db) as database:
+            if database.count_photos() == 0:
+                print("（数据库里没有照片记录，先运行 scan）")
+                return 1
+        with QualityStore.open(args.db) as store:
+            if store.count() == 0:
+                print("（还没有质量数据，先运行 `analyze`）")
+                return 1
+        print(
+            format_quality_report(
+                args.db,
+                flag_ids=flag_ids,
+                explain=args.explain,
+                limit=max(1, args.limit),
+            )
+        )
+        return 0
+
+    if args.command == "dupes":
+        config = QualityConfig()
+        if args.strict:
+            config = config.with_config(sequence_folder_mode=False)
+        if args.distance is not None or args.window is not None:
+            overrides = {}
+            if args.distance is not None:
+                overrides["dhash_distance_max"] = max(0, args.distance)
+            if args.window is not None:
+                overrides["dupe_time_window_s"] = max(0.0, args.window)
+            config = config.with_config(**overrides)
+        print(
+            format_dupes_report(
+                args.db,
+                config=config,
+                limit=max(1, args.limit),
+                show_sequences=args.sequences,
+            )
+        )
+        return 0
+
     if args.command == "filter":
-        if not args.rules and not args.gps:
-            print("filter: 请至少指定 --rules 或 --gps（可用规则见 classify 输出）")
+        if not args.rules and not args.quality and not args.gps:
+            print(
+                "filter: 请至少指定 --rules / --quality / --gps"
+                "（可用规则见 classify，可用标记见 quality）"
+            )
             return 2
         engine = RuleEngine()
         rule_ids = _parse_rule_ids(args.rules, engine) if args.rules else None
+        quality_ids = _parse_quality_ids(args.quality) if args.quality else None
         matched = run_filter(
             args.db,
             rule_ids,
             use_and=not args.or_,
             gps_only=args.gps,
             limit=args.limit,
+            quality_ids=quality_ids,
+            strict=args.strict,
         )
         if not matched:
             print("（没有匹配的照片）")
             return 1
-        for info, matches in matched:
+        for info, matches, quality_flags in matched:
             if args.explain:
-                reasons = "；".join(
+                parts = [
                     f"{match.label}：{match.reason}"
                     for match in matches
                     if rule_ids is None or match.rule_id in rule_ids
+                ]
+                parts.extend(
+                    f"{flag.label}：{flag.reason}"
+                    for flag in quality_flags
+                    if quality_ids is None or flag.flag_id in quality_ids
                 )
+                reasons = "；".join(parts) or "（仅按 GPS 筛选）"
                 print(f"{info.file_name}  [{info.category.upper()}]  {reasons}")
             else:
                 print(str(info.path))

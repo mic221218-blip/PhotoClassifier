@@ -98,7 +98,34 @@ CREATE TABLE IF NOT EXISTS folders (
     added_at        TEXT NOT NULL,
     last_scanned_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS photo_quality (
+    path             TEXT PRIMARY KEY,
+    analyzer_version INTEGER NOT NULL,
+    analyzed_at      TEXT NOT NULL,
+    preview_source   TEXT NOT NULL,
+    preview_width    INTEGER,
+    preview_height   INTEGER,
+    blur_score       REAL,
+    contrast         REAL,
+    anisotropy       REAL,
+    mean_lum         REAL,
+    std_lum          REAL,
+    clip_low_frac    REAL,
+    clip_high_frac   REAL,
+    dhash            TEXT,
+    quick_hash       TEXT,
+    content_hash     TEXT,
+    file_size        INTEGER,
+    file_mtime       TEXT,
+    error            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_quality_source ON photo_quality (preview_source);
 """
+
+#: 当前 schema 版本（写入 ``PRAGMA user_version``，为后续迁移留钩子）。
+SCHEMA_VERSION = 1
 
 #: 按 path 去重的写入语句（列清单固定，编译一次即可）。
 _UPSERT_SQL = """
@@ -197,6 +224,10 @@ class PhotoDatabase:
         self._conn.row_factory = sqlite3.Row
         with self._conn:
             self._conn.executescript(_SCHEMA)
+            current = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            if current < SCHEMA_VERSION:
+                # 只做加法（新表 / 新索引），不重建、不动 photos 数据
+                self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # ---- 生命周期 -------------------------------------------------------- #
 

@@ -67,6 +67,7 @@ _TYPE_RATIONAL = 5
 _TYPE_UNDEFINED = 7
 _TYPE_SLONG = 9
 _TYPE_SRATIONAL = 10
+_TYPE_IFD = 13  # SubIFD 指针的类型（规范推荐 LONG，部分相机用 IFD）
 
 _TYPE_SIZE = {
     _TYPE_BYTE: 1,
@@ -77,6 +78,7 @@ _TYPE_SIZE = {
     _TYPE_UNDEFINED: 1,
     _TYPE_SLONG: 4,
     _TYPE_SRATIONAL: 8,
+    _TYPE_IFD: 4,
 }
 
 # --- IFD0（基本图像目录） ---
@@ -86,6 +88,7 @@ _TAG_MAKE = 0x010F
 _TAG_MODEL = 0x0110
 _TAG_EXIF_IFD_POINTER = 0x8769
 _TAG_GPS_IFD_POINTER = 0x8825
+_TAG_SUB_IFDS = 0x014A
 
 # --- Exif 子 IFD ---
 _TAG_EXPOSURE_TIME = 0x829A
@@ -208,6 +211,52 @@ def _parse_tiff(data, base: int) -> dict[int, tuple[int, int, bytes]]:
                     absorb(sub_entries)
 
     return merged
+
+
+def iter_tiff_ifds(data, base: int = 0, *, include_subifds: bool = False):
+    """逐个产出 TIFF 结构里的 IFD 条目字典（供预览图提取使用）。
+
+    - 跟随 IFD 链（IFD0 → IFD1 → …）；
+    - ``include_subifds=True`` 时额外跟随 SubIFD（标签 0x014A），
+      Nikon 的 NEF 常把全尺寸 JPEG 预览放在 SubIFD 里；
+    - 产出顺序按发现顺序（先 IFD0，再 SubIFD，再下一个 IFD），
+      由调用方决定如何挑选。
+
+    结构损坏时抛 :class:`ExifFormatError`（调用方按单文件容错处理）。
+    本函数只读，不修改 ``data``。
+    """
+    header = _read(data, base, 8, what="TIFF 文件头")
+    if header[:2] == b"II":
+        endian = "<"
+    elif header[:2] == b"MM":
+        endian = ">"
+    else:
+        raise ExifFormatError("不是有效的 TIFF/NEF 文件头")
+    (magic,) = struct.unpack(endian + "H", header[2:4])
+    if magic != 42:
+        raise ExifFormatError("不是有效的 TIFF/NEF 版本号")
+    (ifd_offset,) = struct.unpack(endian + "I", header[4:8])
+
+    visited: set[int] = set()
+    pending: list[int] = [ifd_offset]
+
+    while pending:
+        offset = pending.pop(0)
+        if not offset or offset in visited:
+            continue
+        entries, next_offset = _parse_ifd(data, base, endian, offset, visited)
+        yield entries
+
+        if include_subifds:
+            sub = entries.get(_TAG_SUB_IFDS)
+            if sub is not None and sub[0] in (_TYPE_LONG, _TYPE_IFD) and sub[1]:
+                for index in range(min(sub[1], 64)):
+                    (child,) = struct.unpack_from(endian + "I", sub[2], index * 4)
+                    if child:
+                        pending.append(child)
+
+        if next_offset:
+            pending.append(next_offset)
 
 
 # --------------------------------------------------------------------------- #
