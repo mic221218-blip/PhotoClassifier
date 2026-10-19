@@ -24,12 +24,13 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 
 from src.database import PhotoDatabase
 from src.duplicates import DuplicateResult
 from src.exif_reader import read_photo_info
+from src.filtering import FilterSelection, matches as selection_matches
 from src.formatting import format_shutter, format_size
 from src.photo_info import EXIF_ERROR, EXIF_NO_EXIF, EXIF_OK, PhotoInfo
 from src.preview import PILLOW_AVAILABLE, is_supported
@@ -43,6 +44,8 @@ from src.quality import (
 from src.quality_scan import AnalyzeOptions, analyze_photos, rebuild_duplicates
 from src.quality_store import QualityStore
 from src.rules import RULE_REGISTRY, RuleEngine, RuleMatch
+from src.tag_store import Tag, TagStore
+from src.tags import TagConflict, TagError, chip_colors, normalize_tag_name
 from src.scanner import scan_folder
 from src.shell import open_in_explorer, open_with_default_app
 
@@ -71,15 +74,15 @@ TEXT_FAINT = "#6e717e"
 
 #: 结果列表的列定义：(键, 标题, 宽度, 锚)
 _RESULT_COLUMNS = [
-    ("name", "文件名", 190, "w"),
+    ("name", "文件名", 180, "w"),
     ("category", "类型", 55, "w"),
     ("taken_at", "拍摄时间", 150, "w"),
-    ("camera", "相机", 120, "w"),
+    ("camera", "相机", 110, "w"),
     ("iso", "ISO", 50, "e"),
     ("shutter", "快门", 80, "e"),
-    ("rules", "自动标签", 150, "w"),
-    ("quality", "质量", 95, "w"),
-    ("size", "大小", 85, "e"),
+    ("rules", "自动标签", 180, "w"),
+    ("quality", "质量", 90, "w"),
+    ("size", "大小", 80, "e"),
 ]
 
 #: 质量列的紧凑写法（空间有限，详情面板里显示完整原因）
@@ -139,6 +142,8 @@ class PhotoClassifierApp:
         self.db = PhotoDatabase.open(db_path)
         self.db_path = Path(db_path)
         self.quality_store = QualityStore.open(db_path)
+        self.tag_store = TagStore.open(db_path)
+        self.tag_store.prune()  # 清理已不在照片库里的历史关联
 
         self.checked_folders: set[str] = set()
         self.infos_by_iid: dict[str, PhotoInfo] = {}
@@ -158,6 +163,7 @@ class PhotoClassifierApp:
         self.quality_engine = QualityEngine()
         self.active_rules: set[str] = set()
         self.active_quality: set[str] = set()
+        self.active_tags: set[int] = set()
         self.and_mode = tk.BooleanVar(value=True)
         self.gps_only = tk.BooleanVar(value=False)
         self.rule_vars: dict[str, tk.BooleanVar] = {}
@@ -166,6 +172,14 @@ class PhotoClassifierApp:
         self.duplicates = DuplicateResult()
         self._quality_revision = 0
         self._quality_cache_revision = -1
+        self.tags_by_id: dict[int, Tag] = {}
+        self.tag_counts: dict[int, int] = {}
+        self.tags_by_path: dict[str, list[Tag]] = {}
+        self.tag_ids_by_path: dict[str, set[int]] = {}
+        self._tag_revision = 0
+        self._tag_cache_revision = -1
+        self._tag_entry_var: tk.StringVar | None = None
+        self._last_tag_undo = None
 
         self._setup_window()
         self._build_styles()
@@ -177,9 +191,11 @@ class PhotoClassifierApp:
         self._build_status_bar()
 
         self.refresh_library()
+        self.refresh_tags()
         self.refresh_results()
         self.refresh_status_bar()
         self.root.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.root.bind_all("<Control-z>", lambda _event: self.undo_last_tag_operation())
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _on_mousewheel(self, event) -> None:
@@ -411,6 +427,46 @@ class PhotoClassifierApp:
                 font=self._font(9),
             ).grid(row=i // 2, column=i % 2, sticky="w", pady=1, padx=(0, 6))
 
+        tk.Frame(panel, bg=BORDER_SOFT, height=1).pack(fill="x", padx=12, pady=(8, 6))
+        tk.Label(
+            panel, text="我的标签", bg=PANEL_BG, fg=TEXT, font=self._font(10, bold=True)
+        ).pack(anchor="w", padx=16)
+        tk.Label(
+            panel, text="勾选后与规则 / 质量共用 并且/或者", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
+        ).pack(anchor="w", padx=16, pady=(0, 4))
+
+        tk.Label(panel, text="搜索标签", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)).pack(
+            anchor="w", padx=16
+        )
+        self.tag_search_var = tk.StringVar()
+        search = tk.Entry(
+            panel,
+            textvariable=self.tag_search_var,
+            bg=INPUT_BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=self._font(9),
+        )
+        search.pack(fill="x", padx=16, ipady=4)
+        self.tag_search_var.trace_add("write", lambda *_args: self._refresh_tag_list())
+
+        tag_list_frame = tk.Frame(panel, bg=PANEL_BG)
+        tag_list_frame.pack(fill="x", padx=12, pady=(6, 0))
+        self.tag_tree = ttk.Treeview(
+            tag_list_frame, show="tree", selectmode="browse", height=6
+        )
+        tag_scroll = ttk.Scrollbar(
+            tag_list_frame, orient="vertical", command=self.tag_tree.yview
+        )
+        self.tag_tree.configure(yscrollcommand=tag_scroll.set)
+        self.tag_tree.pack(side="left", fill="x", expand=True)
+        tag_scroll.pack(side="right", fill="y")
+        self.tag_tree.bind("<ButtonRelease-1>", self._on_tag_click)
+
+        self.btn_manage_tags = self._button(panel, "管理标签…", self.open_tag_manager)
+        self.btn_manage_tags.pack(fill="x", padx=16, pady=(6, 2), ipady=1)
+
         logic_row = tk.Frame(panel, bg=PANEL_BG)
         logic_row.pack(fill="x", padx=16, pady=(8, 0))
         tk.Label(logic_row, text="条件组合", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9)).pack(anchor="w")
@@ -497,6 +553,7 @@ class PhotoClassifierApp:
         self.result_tree.tag_configure("dim", foreground=TEXT_SUB)
         self.result_tree.bind("<<TreeviewSelect>>", self._on_result_select)
         self.result_tree.bind("<Double-1>", self._on_result_double_click)
+        self.result_tree.bind("<Button-3>", self._show_result_menu)
 
     # ------------------------------------------------------------------ #
     # 右侧：详情面板
@@ -569,6 +626,42 @@ class PhotoClassifierApp:
         self.detail_rows = tk.Frame(content, bg=PANEL_BG)
         self.detail_rows.pack(fill="x", padx=18, pady=(8, 0))
 
+        # 我的标签（V3）：chips + 输入 + 自动补全
+        tk.Label(content, text="我的标签", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(8, bold=True)).pack(
+            anchor="w", padx=18, pady=(8, 2)
+        )
+        self.tag_chips_frame = tk.Frame(content, bg=PANEL_BG)
+        self.tag_chips_frame.pack(fill="x", padx=18)
+        tag_entry_row = tk.Frame(content, bg=PANEL_BG)
+        tag_entry_row.pack(fill="x", padx=18, pady=(4, 0))
+        self._tag_entry_var = tk.StringVar()
+        self.tag_entry = tk.Entry(
+            tag_entry_row,
+            textvariable=self._tag_entry_var,
+            bg=INPUT_BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=self._font(9),
+        )
+        self.tag_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self.tag_entry.bind("<Return>", lambda _event: self._add_tag_from_entry())
+        self.btn_add_tag = self._button(tag_entry_row, "添加", self._add_tag_from_entry)
+        self.btn_add_tag.pack(side="left", padx=(6, 0), ipady=1)
+        self._tag_entry_var.trace_add("write", lambda *_args: self._update_tag_suggestions())
+        self.tag_suggestions = tk.Listbox(
+            content,
+            height=3,
+            bg=INPUT_BG,
+            fg=TEXT,
+            selectbackground=ACCENT_DIM,
+            selectforeground=TEXT,
+            relief="flat",
+            font=self._font(9),
+            highlightthickness=0,
+        )
+        self.tag_suggestions.bind("<ButtonRelease-1>", self._on_tag_suggestion_clicked)
+
         # 质量分析（V2.5）：紧凑摘要 + 标记原因（放在规则之前，V2.5 的重点）
         tk.Label(content, text="质量分析", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(8, bold=True)).pack(
             anchor="w", padx=18, pady=(8, 2)
@@ -608,6 +701,9 @@ class PhotoClassifierApp:
             child.destroy()
         for child in self.quality_frame.winfo_children():
             child.destroy()
+        for child in self.tag_chips_frame.winfo_children():
+            child.destroy()
+        self.tag_suggestions.pack_forget()
         if info is None:
             self.detail_name.config(text="未选择照片")
             self.badge_format.config(text="")
@@ -621,6 +717,8 @@ class PhotoClassifierApp:
             tk.Label(
                 self.quality_frame, text="—", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
             ).pack(anchor="w")
+            self.tag_entry.config(state="disabled")
+            self.btn_add_tag.config(state="disabled", fg=TEXT_FAINT)
             self.btn_open.config(state="disabled", command=None)
             self.btn_reveal.config(state="disabled", command=None)
             self.btn_copy.config(state="disabled", command=None)
@@ -689,6 +787,7 @@ class PhotoClassifierApp:
                 justify="left",
             ).pack(side="left", anchor="w")
 
+        self._fill_tag_editor(info)
         self._fill_quality_detail(info)
 
     # ------------------------------------------------------------------ #
@@ -697,7 +796,7 @@ class PhotoClassifierApp:
 
     def _quality_flags_for(self, info: PhotoInfo) -> list[QualityFlag]:
         """一张照片当前的质量标记（含重复）。"""
-        key = str(info.path.resolve())
+        key = str(info.path)
         measurement = self.measurements_by_path.get(key)
         if measurement is None or not measurement.analyzed:
             return []
@@ -708,7 +807,7 @@ class PhotoClassifierApp:
         return flags
 
     def _fill_quality_detail(self, info: PhotoInfo) -> None:
-        key = str(info.path.resolve())
+        key = str(info.path)
         measurement = self.measurements_by_path.get(key)
         if measurement is None:
             tk.Label(
@@ -782,6 +881,419 @@ class PhotoClassifierApp:
                 wraplength=250,
                 justify="left",
             ).pack(side="left", anchor="w")
+
+    # ------------------------------------------------------------------ #
+    # 我的标签：单张编辑、批量、管理与撤销（V3）
+    # ------------------------------------------------------------------ #
+
+    def _fill_tag_editor(self, info: PhotoInfo | None) -> None:
+        for child in self.tag_chips_frame.winfo_children():
+            child.destroy()
+        if info is None:
+            self.tag_entry.delete(0, "end")
+            self.tag_entry.config(state="disabled")
+            self.btn_add_tag.config(state="disabled", fg=TEXT_FAINT)
+            self.tag_suggestions.pack_forget()
+            return
+
+        self.tag_entry.config(state="normal")
+        self.btn_add_tag.config(state="normal", fg=TEXT)
+        tags = self.tags_by_path.get(str(info.path), [])
+        if not tags:
+            tk.Label(
+                self.tag_chips_frame,
+                text="（还没有标签）",
+                bg=PANEL_BG,
+                fg=TEXT_FAINT,
+                font=self._font(8),
+            ).grid(row=0, column=0, sticky="w")
+        for index, tag in enumerate(tags):
+            background, foreground = chip_colors(tag.color)
+            chip = tk.Frame(self.tag_chips_frame, bg=background)
+            chip.grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 4), pady=1)
+            tk.Label(
+                chip,
+                text=tag.name,
+                bg=background,
+                fg=foreground,
+                font=self._font(8),
+                padx=6,
+                pady=1,
+            ).pack(side="left")
+            tk.Button(
+                chip,
+                text="×",
+                command=lambda tag_id=tag.id: self._remove_tag_from_current(tag_id),
+                bg=background,
+                fg=foreground,
+                activebackground=background,
+                activeforeground=foreground,
+                relief="flat",
+                bd=0,
+                font=self._font(8),
+                cursor="hand2",
+                padx=2,
+            ).pack(side="left")
+        self._update_tag_suggestions()
+
+    def _update_tag_suggestions(self) -> None:
+        if self._tag_entry_var is None or self.current is None:
+            return
+        query = self._tag_entry_var.get().strip().casefold()
+        if not query:
+            self.tag_suggestions.pack_forget()
+            return
+        current_ids = self.tag_ids_by_path.get(str(self.current.path), set())
+        matches = [
+            tag
+            for tag in self.tags_by_id.values()
+            if tag.id not in current_ids and query in tag.name.casefold()
+        ]
+        matches.sort(key=lambda tag: tag.name.casefold())
+        self.tag_suggestions.delete(0, "end")
+        for tag in matches[:6]:
+            self.tag_suggestions.insert("end", tag.name)
+        if matches:
+            self.tag_suggestions.pack(fill="x", padx=18, pady=(2, 0))
+        else:
+            self.tag_suggestions.pack_forget()
+
+    def _on_tag_suggestion_clicked(self, _event=None) -> None:
+        selection = self.tag_suggestions.curselection()
+        if not selection:
+            return
+        self._tag_entry_var.set(self.tag_suggestions.get(selection[0]))
+        self.tag_suggestions.pack_forget()
+        self._add_tag_from_entry()
+
+    def _add_tag_from_entry(self) -> None:
+        if self.current is None:
+            return
+        try:
+            name = normalize_tag_name(self._tag_entry_var.get())
+        except TagError as exc:
+            self.status_left.config(text=str(exc))
+            return
+
+        tag = self.tag_store.get_by_name(name)
+        if tag is None:
+            if not messagebox.askyesno(
+                "新建标签", f"标签「{name}」不存在，创建并添加到当前照片？"
+            ):
+                return
+            try:
+                tag = self.tag_store.create_tag(name)
+            except TagError as exc:
+                self.status_left.config(text=str(exc))
+                return
+
+        current_ids = self.tag_ids_by_path.get(str(self.current.path), set())
+        if tag.id in current_ids:
+            self.status_left.config(text=f"这张照片已经有标签「{tag.name}」")
+            self._tag_entry_var.set("")
+            return
+
+        self.tag_store.add_tags([self.current.path], [tag.id])
+        self._last_tag_undo = None
+        self._tag_entry_var.set("")
+        self._after_tag_change(f"已添加标签「{tag.name}」")
+
+    def _remove_tag_from_current(self, tag_id: int) -> None:
+        if self.current is None:
+            return
+        tags = {tag.id: tag for tag in self.tags_by_id.values()}
+        removed = self.tag_store.remove_tags([self.current.path], [tag_id])
+        name = tags[tag_id].name if tag_id in tags else str(tag_id)
+        if removed:
+            self._last_tag_undo = None
+            self._after_tag_change(f"已移除标签「{name}」")
+
+    def _after_tag_change(self, message: str) -> None:
+        self._tag_revision += 1
+        self.refresh_tags()
+        self.refresh_results()
+        if self.current is not None:
+            self.set_detail(self.current)
+        self.refresh_status_bar()
+        self.status_left.config(text=message)
+
+    def _ask_tag_choice(
+        self,
+        title: str,
+        prompt: str,
+        *,
+        allowed: set[str] | None = None,
+    ) -> str | None:
+        """一个带搜索的标签选择小窗口；返回名称或 None。"""
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.configure(bg=PANEL_BG)
+        window.transient(self.root)
+        window.geometry("360x320")
+        tk.Label(
+            window, text=prompt, bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9), wraplength=330,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(12, 6))
+        variable = tk.StringVar()
+        entry = tk.Entry(
+            window,
+            textvariable=variable,
+            bg=INPUT_BG,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=self._font(10),
+        )
+        entry.pack(fill="x", padx=14, ipady=4)
+        listbox = tk.Listbox(
+            window,
+            bg=INPUT_BG,
+            fg=TEXT,
+            selectbackground=ACCENT_DIM,
+            selectforeground=TEXT,
+            relief="flat",
+            font=self._font(9),
+            highlightthickness=0,
+        )
+        listbox.pack(fill="both", expand=True, padx=14, pady=(8, 0))
+        result: dict[str, str | None] = {"name": None}
+
+        def refresh_list(*_args) -> None:
+            query = variable.get().strip().casefold()
+            listbox.delete(0, "end")
+            for tag in self.tag_store.list_tags():
+                if allowed is not None and tag.name not in allowed:
+                    continue
+                if query and query not in tag.name.casefold():
+                    continue
+                listbox.insert("end", tag.name)
+
+        variable.trace_add("write", refresh_list)
+        refresh_list()
+
+        def choose(_event=None) -> None:
+            selected = listbox.curselection()
+            if selected:
+                variable.set(listbox.get(selected[0]))
+            name = variable.get().strip()
+            if not name:
+                return
+            result["name"] = name
+            window.destroy()
+
+        listbox.bind("<Double-Button-1>", choose)
+        entry.bind("<Return>", choose)
+        buttons = tk.Frame(window, bg=PANEL_BG)
+        buttons.pack(fill="x", padx=14, pady=10)
+        self._button(buttons, "确定", choose, primary=True).pack(side="right", ipady=1)
+        self._button(buttons, "取消", window.destroy).pack(side="right", padx=(0, 6), ipady=1)
+        entry.focus_set()
+        window.grab_set()
+        window.wait_window()
+        return result["name"]
+
+    def _selected_infos(self) -> list[PhotoInfo]:
+        return [
+            self.infos_by_iid[iid]
+            for iid in self.result_tree.selection()
+            if iid in self.infos_by_iid
+        ]
+
+    def _show_result_menu(self, event) -> None:
+        iid = self.result_tree.identify_row(event.y)
+        if not iid:
+            return
+        if iid not in self.result_tree.selection():
+            self.result_tree.selection_set(iid)
+        count = len(self._selected_infos())
+        menu = tk.Menu(self.root, tearoff=0, bg=CARD_BG, fg=TEXT, activebackground=ACCENT_DIM)
+        menu.add_command(label="打开图片", command=self.open_selected)
+        menu.add_command(label="打开文件位置", command=self.reveal_selected)
+        menu.add_separator()
+        menu.add_command(
+            label=f"添加标签…（{count} 张）", command=self.batch_add_tags
+        )
+        menu.add_command(
+            label=f"移除标签…（{count} 张）", command=self.batch_remove_tags
+        )
+        menu.add_separator()
+        menu.add_command(label="复制路径", command=self.copy_selected_path)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def batch_add_tags(self) -> None:
+        infos = self._selected_infos()
+        if not infos:
+            return
+        name = self._ask_tag_choice(
+            "批量添加标签", f"给选中的 {len(infos)} 张照片添加哪个标签？"
+        )
+        if not name:
+            return
+        try:
+            normalized = normalize_tag_name(name)
+        except TagError as exc:
+            self.status_left.config(text=str(exc))
+            return
+        tag = self.tag_store.get_by_name(normalized)
+        if tag is None:
+            if not messagebox.askyesno(
+                "新建标签", f"标签「{normalized}」不存在，创建并添加？"
+            ):
+                return
+            try:
+                tag = self.tag_store.create_tag(normalized)
+            except TagError as exc:
+                self.status_left.config(text=str(exc))
+                return
+        if not messagebox.askyesno(
+            "批量添加标签",
+            f"将给 {len(infos)} 张照片添加标签「{tag.name}」。\n\n继续？",
+        ):
+            return
+        added, unknown = self.tag_store.add_tags(
+            [info.path for info in infos], [tag.id]
+        )
+        if added:
+            self._last_tag_undo = ("add", added)
+        message = f"已给 {len(infos)} 张照片添加标签「{tag.name}」（新增 {len(added)} 条）"
+        if unknown:
+            message += f"，跳过 {len(unknown)} 个未知路径"
+        self._after_tag_change(message)
+
+    def batch_remove_tags(self) -> None:
+        infos = self._selected_infos()
+        if not infos:
+            return
+        common: set[int] = set()
+        for index, info in enumerate(infos):
+            ids = set(self.tag_ids_by_path.get(str(info.path), set()))
+            common = ids if index == 0 else common & ids
+        if not common:
+            messagebox.showinfo("批量移除标签", "选中的照片没有共同标签。")
+            return
+        names = {self.tags_by_id[tag_id].name for tag_id in common if tag_id in self.tags_by_id}
+        if not names:
+            return
+        name = self._ask_tag_choice(
+            "批量移除标签",
+            f"从选中的 {len(infos)} 张照片移除哪个标签？（只列出共同标签）",
+            allowed=names,
+        )
+        if not name:
+            return
+        tag = self.tag_store.get_by_name(name)
+        if tag is None or tag.id not in common:
+            return
+        if not messagebox.askyesno(
+            "批量移除标签",
+            f"将从 {len(infos)} 张照片移除标签「{tag.name}」（不会删除照片）。\n\n继续？",
+        ):
+            return
+        removed = self.tag_store.remove_tags([info.path for info in infos], [tag.id])
+        if removed:
+            self._last_tag_undo = ("remove", removed)
+        self._after_tag_change(
+            f"已从 {len(infos)} 张照片移除标签「{tag.name}」（{len(removed)} 条）"
+        )
+
+    def undo_last_tag_operation(self) -> None:
+        if not self._last_tag_undo:
+            return
+        action, pairs = self._last_tag_undo
+        self._last_tag_undo = None
+        if action == "add":
+            self.tag_store.remove_assignments(pairs)
+            message = "已撤销上一次批量添加标签"
+        else:
+            self.tag_store.add_assignments(pairs)
+            message = "已撤销上一次批量移除标签"
+        self._after_tag_change(message)
+
+    def open_tag_manager(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("标签管理")
+        window.configure(bg=PANEL_BG)
+        window.transient(self.root)
+        window.geometry("520x420")
+        tree = ttk.Treeview(
+            window, columns=("name", "count", "created"), show="headings", selectmode="browse"
+        )
+        for key, title, width in (
+            ("name", "标签", 180),
+            ("count", "照片数", 80),
+            ("created", "创建时间", 160),
+        ):
+            tree.heading(key, text=title)
+            tree.column(key, width=width, anchor="w")
+        tree.pack(fill="both", expand=True, padx=14, pady=(14, 8))
+
+        def refresh() -> None:
+            tree.delete(*tree.get_children())
+            counts = self.tag_store.counts()
+            for tag in self.tag_store.list_tags():
+                tree.insert(
+                    "", "end", iid=str(tag.id),
+                    values=(tag.name, counts.get(tag.id, 0), tag.created_at),
+                )
+
+        def selected_tag() -> Tag | None:
+            selection = tree.selection()
+            if not selection:
+                return None
+            return self.tag_store.get(int(selection[0]))
+
+        def create() -> None:
+            name = simpledialog.askstring("新建标签", "标签名：", parent=window)
+            if not name:
+                return
+            try:
+                self.tag_store.create_tag(name)
+            except TagError as exc:
+                messagebox.showwarning("新建标签", str(exc), parent=window)
+                return
+            refresh()
+
+        def rename() -> None:
+            tag = selected_tag()
+            if tag is None:
+                return
+            name = simpledialog.askstring(
+                "重命名标签", "新名称：", initialvalue=tag.name, parent=window
+            )
+            if not name:
+                return
+            try:
+                self.tag_store.rename_tag(tag.id, name)
+            except TagError as exc:
+                messagebox.showwarning("重命名标签", str(exc), parent=window)
+                return
+            refresh()
+
+        def delete() -> None:
+            tag = selected_tag()
+            if tag is None:
+                return
+            count = self.tag_store.counts().get(tag.id, 0)
+            if not messagebox.askyesno(
+                "删除标签",
+                f"标签「{tag.name}」将从 {count} 张照片移除（不会删除照片）。\n\n继续？",
+                parent=window,
+            ):
+                return
+            self.tag_store.delete_tag(tag.id)
+            refresh()
+
+        buttons = tk.Frame(window, bg=PANEL_BG)
+        buttons.pack(fill="x", padx=14, pady=(0, 12))
+        self._button(buttons, "新建", create).pack(side="left", ipady=1)
+        self._button(buttons, "重命名", rename).pack(side="left", padx=(6, 0), ipady=1)
+        self._button(buttons, "删除", delete).pack(side="left", padx=(6, 0), ipady=1)
+        self._button(buttons, "关闭", window.destroy).pack(side="right", ipady=1)
+        refresh()
+        window.grab_set()
+        window.wait_window()
+        self._last_tag_undo = None
+        self._after_tag_change("标签已更新")
 
     # ------------------------------------------------------------------ #
     # 底部状态栏
@@ -860,6 +1372,7 @@ class PhotoClassifierApp:
         self.checked_folders.add(str(Path(chosen).resolve()))
         self.folder_var.set(str(Path(chosen).resolve()))
         self.refresh_library()
+        self.refresh_tags()
         self.refresh_results()
         self.refresh_status_bar()
 
@@ -880,6 +1393,7 @@ class PhotoClassifierApp:
         self.db.remove_folder(folder)
         self.checked_folders.discard(folder)
         self.refresh_library()
+        self.refresh_tags()
         self.refresh_results()
         self.refresh_status_bar()
 
@@ -894,24 +1408,29 @@ class PhotoClassifierApp:
         self.matches_by_iid = {}
         self.quality_by_iid = {}
         self._ensure_quality_cache(photos)
+        self._ensure_tag_cache()
 
         self.result_tree.delete(*self.result_tree.get_children())
         visible = 0
         for info in photos:
             matches = self.rule_engine.evaluate(info)
             quality_flags = self._quality_flags_for(info)
-            if not self._passes_filter(info, matches, quality_flags):
+            user_tags = self.tags_by_path.get(str(info.path), [])
+            if not self._passes_filter(info, matches, quality_flags, user_tags):
                 continue
             iid = str(info.path)
             self.matches_by_iid[iid] = matches
             self.quality_by_iid[iid] = quality_flags
             shutter = format_shutter(info.exposure_time_s) if info.exposure_time_s else ""
             labels = " · ".join(match.label for match in matches)
+            if user_tags:
+                user_text = " · ".join(f"★{tag.name}" for tag in user_tags)
+                labels = f"{user_text} ｜ {labels}" if labels else user_text
             quality_text = " · ".join(
                 _QUALITY_SHORT.get(flag.flag_id, flag.label) for flag in quality_flags
             )
             if not quality_text:
-                measurement = self.measurements_by_path.get(str(info.path.resolve()))
+                measurement = self.measurements_by_path.get(str(info.path))
                 if measurement is not None and measurement.error:
                     quality_text = "失败"
             values = (
@@ -935,7 +1454,7 @@ class PhotoClassifierApp:
 
         total = self.db.count_photos()
         filter_note = ""
-        if self.active_rules or self.active_quality or self.gps_only.get():
+        if self.active_rules or self.active_quality or self.active_tags or self.gps_only.get():
             filter_note = " · 已筛选"
         self.count_label.config(
             text=f"库中共 {total:,} 个文件 · 当前显示 {visible:,} 张{filter_note}"
@@ -944,6 +1463,53 @@ class PhotoClassifierApp:
             keep = self.infos_by_iid.get(str(self.current.path))
             if keep is not None and str(keep.path) in self.matches_by_iid:
                 self.set_detail(keep)
+
+    def _ensure_tag_cache(self) -> None:
+        """加载标签、计数与关联；只在标签数据变化后重新查询。"""
+        if self._tag_cache_revision == self._tag_revision:
+            return
+        tags = self.tag_store.list_tags()
+        self.tags_by_id = {tag.id: tag for tag in tags}
+        self.tag_counts = self.tag_store.counts()
+        self.tag_ids_by_path = self.tag_store.assignments()
+        self.tags_by_path = {}
+        for path, tag_ids in self.tag_ids_by_path.items():
+            items = [self.tags_by_id[tag_id] for tag_id in tag_ids if tag_id in self.tags_by_id]
+            items.sort(key=lambda tag: tag.name.casefold())
+            self.tags_by_path[path] = items
+        self._tag_cache_revision = self._tag_revision
+
+    def refresh_tags(self) -> None:
+        self._ensure_tag_cache()
+        self._refresh_tag_list()
+
+    def _refresh_tag_list(self) -> None:
+        if not hasattr(self, "tag_tree"):
+            return
+        self._ensure_tag_cache()
+        self.tag_tree.delete(*self.tag_tree.get_children())
+        self.active_tags &= set(self.tags_by_id)
+        query = self.tag_search_var.get().strip().casefold()
+        for tag in sorted(self.tags_by_id.values(), key=lambda item: item.name.casefold()):
+            if query and query not in tag.name.casefold():
+                continue
+            mark = "☑" if tag.id in self.active_tags else "☐"
+            count = self.tag_counts.get(tag.id, 0)
+            self.tag_tree.insert(
+                "", "end", iid=str(tag.id), text=f"{mark}  {tag.name}    {count:,}"
+            )
+
+    def _on_tag_click(self, event) -> None:
+        iid = self.tag_tree.identify_row(event.y)
+        if not iid:
+            return
+        tag_id = int(iid)
+        if tag_id in self.active_tags:
+            self.active_tags.discard(tag_id)
+        else:
+            self.active_tags.add(tag_id)
+        self._refresh_tag_list()
+        self.refresh_results()
 
     def _ensure_quality_cache(self, photos: list[PhotoInfo]) -> None:
         """测量值与重复分组只在质量数据变化后重算，避免每次筛选都全量重跑。"""
@@ -959,18 +1525,25 @@ class PhotoClassifierApp:
         info: PhotoInfo,
         matches: list[RuleMatch],
         quality_flags: list[QualityFlag],
+        user_tags: list[Tag] | None = None,
     ) -> bool:
-        """当前筛选条件是否接受这张照片（自动标签与质量标记共用 AND/OR）。"""
-        if self.gps_only.get() and not info.has_gps:
-            return False
-        selected = self.active_rules | self.active_quality
-        if selected:
-            hit = {match.rule_id for match in matches}
-            hit |= {flag.flag_id for flag in quality_flags}
-            if self.and_mode.get():
-                return selected.issubset(hit)
-            return bool(selected & hit)
-        return True
+        """规则、质量、用户标签共用同一个筛选器（见 src/filtering.py）。"""
+        selection = FilterSelection(
+            rule_ids=frozenset(self.active_rules),
+            quality_ids=frozenset(self.active_quality),
+            tag_ids=frozenset(self.active_tags),
+            and_mode=self.and_mode.get(),
+            gps_only=self.gps_only.get(),
+        )
+        if selection.is_empty:
+            return True
+        return selection_matches(
+            info,
+            rule_hits={match.rule_id for match in matches},
+            quality_hits={flag.flag_id for flag in quality_flags},
+            tag_hits={tag.id for tag in (user_tags or [])},
+            selection=selection,
+        )
 
     def _on_filter_changed(self) -> None:
         self.active_rules = {
@@ -993,6 +1566,8 @@ class PhotoClassifierApp:
         self.gps_only.set(False)
         self.active_rules = set()
         self.active_quality = set()
+        self.active_tags = set()
+        self._refresh_tag_list()
         self.refresh_results()
 
     @staticmethod
@@ -1267,7 +1842,10 @@ class PhotoClassifierApp:
             try:
                 self.quality_store.close()
             finally:
-                self.root.destroy()
+                try:
+                    self.tag_store.close()
+                finally:
+                    self.root.destroy()
 
 
 def _category_label(category: str) -> str:
@@ -1304,6 +1882,7 @@ def main(argv: list[str] | None = None) -> int:
                 app = PhotoClassifierApp(root, Path(tmp) / "selftest.db")
                 root.update_idletasks()
                 root.update()
+                app.tag_store.close()
                 app.quality_store.close()
                 app.db.close()  # 关闭数据库，允许临时目录被清理
             root.destroy()
