@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from src.photo_info import EXIF_STATUSES, PhotoInfo
+from src.tags import PRESET_TAGS, color_for
 
 
 #: photos 表的全部业务列（不含 path 主键），顺序与 _row_to_photo_info 一致。
@@ -124,8 +125,35 @@ CREATE TABLE IF NOT EXISTS photo_quality (
 CREATE INDEX IF NOT EXISTS idx_quality_source ON photo_quality (preview_source);
 """
 
+#: V3 标签表结构（单独抽出：TagStore 用独立连接时也能兜底建表）。
+TAGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tags (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    color       TEXT,
+    kind        TEXT NOT NULL DEFAULT 'user',
+    created_at  TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name ON tags (name COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS photo_tags (
+    path        TEXT NOT NULL,
+    tag_id      INTEGER NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'user',
+    confidence  REAL,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (path, tag_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_photo_tags_tag ON photo_tags (tag_id);
+CREATE INDEX IF NOT EXISTS idx_photo_tags_path ON photo_tags (path);
+"""
+
+_SCHEMA = _SCHEMA + TAGS_SCHEMA
+
 #: 当前 schema 版本（写入 ``PRAGMA user_version``，为后续迁移留钩子）。
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: 按 path 去重的写入语句（列清单固定，编译一次即可）。
 _UPSERT_SQL = """
@@ -225,6 +253,16 @@ class PhotoDatabase:
         with self._conn:
             self._conn.executescript(_SCHEMA)
             current = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            if current < 2:
+                # 首次升级到 V3：写入预置标签（只建标签，不关联照片）。
+                # 用 OR IGNORE 保证重复运行安全；用户之后删光标签也不会被重新塞回来。
+                now = _now()
+                for name in PRESET_TAGS:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO tags (name, color, kind, created_at) "
+                        "VALUES (?, ?, 'user', ?)",
+                        (name, color_for(name), now),
+                    )
             if current < SCHEMA_VERSION:
                 # 只做加法（新表 / 新索引），不重建、不动 photos 数据
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
