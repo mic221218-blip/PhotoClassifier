@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,29 +13,12 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from src.database import TAGS_SCHEMA
+from src.paths import db_key, resolve_key
 from src.tags import TagConflict, TagError, color_for, normalize_tag_name, tag_key
 
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _resolve_path(path: str | Path) -> str:
-    """写入/精确查找用：与 ``photos.path`` 的存储方式保持一致。"""
-    return str(Path(path).resolve())
-
-
-def _db_path(path: str | Path) -> str:
-    """热路径用：数据库里的路径已经是绝对路径，不再触发文件系统 resolve。
-
-    仅用于「路径来自 photos 表」的读取场景；写入/单点查找用 ``_resolve_path``。
-    相对路径仍会 resolve。
-    """
-    text = os.path.normpath(str(path))
-    candidate = Path(text)
-    if candidate.is_absolute():
-        return text
-    return str(candidate.resolve())
 
 
 @dataclass(frozen=True)
@@ -56,6 +38,8 @@ class TagStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         with self._conn:
             self._conn.executescript(TAGS_SCHEMA)
 
@@ -97,7 +81,7 @@ class TagStore:
         ).fetchone()
         if row is not None:
             return _row_to_tag(row)
-        # SQLite NOCASE 只处理 ASCII，非 ASCII 大小写（如俄文）再兜底比较一次
+        # SQLite NOCASE 只处理 ASCII，非 ASCII 大小写再兜底比较一次
         key = tag_key(normalized)
         for tag in self.list_tags():
             if tag_key(tag.name) == key:
@@ -159,87 +143,89 @@ class TagStore:
     def add_tags(
         self, paths: Iterable[str | Path], tag_ids: Iterable[int], *, source: str = "user"
     ) -> tuple[list[tuple[str, int]], list[str]]:
-        """给一批照片加标签。
+        """给一批照片加标签（批量写入，幂等）。
 
         返回 ``(新增的 (path, tag_id) 列表, 不在 photos 表里的路径列表)``。
-        已存在的关联不会重复添加。
         """
-        path_list = list(dict.fromkeys(_resolve_path(path) for path in paths))
+        path_list, known_paths = self._normalise_paths(paths)
         tag_list = list(dict.fromkeys(int(tag_id) for tag_id in tag_ids))
         if not path_list or not tag_list:
             return [], []
 
-        known_paths = self._known_paths(path_list)
         unknown = [path for path in path_list if path not in known_paths]
         known_tags = self._known_tag_ids(tag_list)
-        added: list[tuple[str, int]] = []
+        pairs = [
+            (path, tag_id)
+            for path in path_list
+            if path in known_paths
+            for tag_id in tag_list
+            if tag_id in known_tags
+        ]
+        if not pairs:
+            return [], unknown
 
-        with self._conn:
-            for path in path_list:
-                if path not in known_paths:
-                    continue
-                for tag_id in tag_list:
-                    if tag_id not in known_tags:
-                        continue
-                    cursor = self._conn.execute(
-                        "INSERT OR IGNORE INTO photo_tags "
-                        "(path, tag_id, source, confidence, created_at) "
-                        "VALUES (?, ?, ?, NULL, ?)",
-                        (path, tag_id, source, _now()),
-                    )
-                    if cursor.rowcount:
-                        added.append((path, tag_id))
-        return added, unknown
+        existing = self._existing_pairs(pairs)
+        new_pairs = [pair for pair in pairs if pair not in existing]
+        if new_pairs:
+            now = _now()
+            with self._conn:
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO photo_tags "
+                    "(path, tag_id, source, confidence, created_at) "
+                    "VALUES (?, ?, ?, NULL, ?)",
+                    [(path, tag_id, source, now) for path, tag_id in new_pairs],
+                )
+        return new_pairs, unknown
 
     def add_assignments(
         self, pairs: Iterable[tuple[str, int]], *, source: str = "user"
     ) -> int:
-        """按精确的 (path, tag_id) 恢复关联（撤销用）。"""
-        pair_list = [(str(path), int(tag_id)) for path, tag_id in pairs]
+        """按精确的 (path, tag_id) 恢复关联（撤销用），返回新增条数。"""
+        pair_list = [(db_key(path), int(tag_id)) for path, tag_id in pairs]
         known_tags = self._known_tag_ids(sorted({tag_id for _, tag_id in pair_list}))
-        added = 0
-        with self._conn:
-            for path, tag_id in pair_list:
-                if tag_id not in known_tags:
-                    continue
-                cursor = self._conn.execute(
+        pair_list = [(path, tag_id) for path, tag_id in pair_list if tag_id in known_tags]
+        existing = self._existing_pairs(pair_list)
+        new_pairs = [pair for pair in pair_list if pair not in existing]
+        if new_pairs:
+            now = _now()
+            with self._conn:
+                self._conn.executemany(
                     "INSERT OR IGNORE INTO photo_tags "
                     "(path, tag_id, source, confidence, created_at) "
                     "VALUES (?, ?, ?, NULL, ?)",
-                    (_resolve_path(path), int(tag_id), source, _now()),
+                    [(path, tag_id, source, now) for path, tag_id in new_pairs],
                 )
-                added += 1 if cursor.rowcount else 0
-        return added
+        return len(new_pairs)
 
     def remove_tags(
         self, paths: Iterable[str | Path], tag_ids: Iterable[int]
     ) -> list[tuple[str, int]]:
         """从一批照片移除标签，返回实际删除的 (path, tag_id)。"""
-        path_list = list(dict.fromkeys(_resolve_path(path) for path in paths))
+        path_list, _known = self._normalise_paths(paths)
         tag_list = list(dict.fromkeys(int(tag_id) for tag_id in tag_ids))
-        removed: list[tuple[str, int]] = []
-        with self._conn:
-            for path in path_list:
-                for tag_id in tag_list:
-                    cursor = self._conn.execute(
-                        "DELETE FROM photo_tags WHERE path = ? AND tag_id = ?",
-                        (path, tag_id),
-                    )
-                    if cursor.rowcount:
-                        removed.append((path, tag_id))
-        return removed
+        if not path_list or not tag_list:
+            return []
+        pairs = [(path, tag_id) for path in path_list for tag_id in tag_list]
+        existing = self._existing_pairs(pairs)
+        if existing:
+            with self._conn:
+                self._conn.executemany(
+                    "DELETE FROM photo_tags WHERE path = ? AND tag_id = ?",
+                    list(existing),
+                )
+        return list(existing)
 
     def remove_assignments(self, pairs: Iterable[tuple[str, int]]) -> int:
-        """按精确的 (path, tag_id) 删除关联（撤销用）。"""
-        removed = 0
-        with self._conn:
-            for path, tag_id in pairs:
-                cursor = self._conn.execute(
+        """按精确的 (path, tag_id) 删除关联（撤销用），返回删除条数。"""
+        pair_list = [(db_key(path), int(tag_id)) for path, tag_id in pairs]
+        existing = self._existing_pairs(pair_list)
+        if existing:
+            with self._conn:
+                self._conn.executemany(
                     "DELETE FROM photo_tags WHERE path = ? AND tag_id = ?",
-                    (_db_path(path), int(tag_id)),
+                    list(existing),
                 )
-                removed += 1 if cursor.rowcount else 0
-        return removed
+        return len(existing)
 
     # ---- 查询 ------------------------------------------------------------ #
 
@@ -248,13 +234,13 @@ class TagStore:
             "SELECT t.id, t.name, t.color, t.kind, t.created_at "
             "FROM tags t JOIN photo_tags pt ON pt.tag_id = t.id "
             "WHERE pt.path = ? ORDER BY t.name COLLATE NOCASE",
-            (_resolve_path(path),),
+            (resolve_key(path),),
         ).fetchall()
         return [_row_to_tag(row) for row in rows]
 
     def tags_for_paths(self, paths: Iterable[str | Path]) -> dict[str, list[Tag]]:
         # 热路径：调用方应传 photos 表里的绝对路径
-        path_list = list(dict.fromkeys(_db_path(path) for path in paths))
+        path_list = list(dict.fromkeys(db_key(path) for path in paths))
         result: dict[str, list[Tag]] = {path: [] for path in path_list}
         if not path_list:
             return result
@@ -300,6 +286,36 @@ class TagStore:
         return int(cursor.rowcount or 0)
 
     # ---- 内部 ------------------------------------------------------------ #
+
+    def _normalise_paths(self, paths: Iterable[str | Path]) -> tuple[list[str], set[str]]:
+        """先按数据库 key 匹配；只有匹配不上时才 resolve（处理大小写/相对路径）。"""
+        keys = list(dict.fromkeys(db_key(path) for path in paths))
+        known = self._known_paths(keys)
+        missing = [key for key in keys if key not in known]
+        if missing:
+            resolved = {key: resolve_key(key) for key in missing}
+            keys = [resolved.get(key, key) for key in keys]
+            known = self._known_paths(keys)
+        return keys, known
+
+    def _existing_pairs(self, pairs: Sequence[tuple[str, int]]) -> set[tuple[str, int]]:
+        """查出一批 pair 里已经存在的关联（用于批量插入/删除与撤销）。"""
+        if not pairs:
+            return set()
+        paths = sorted({path for path, _ in pairs})
+        tag_ids = sorted({tag_id for _, tag_id in pairs})
+        result: set[tuple[str, int]] = set()
+        for start in range(0, len(paths), 500):
+            chunk = paths[start : start + 500]
+            path_marks = ", ".join("?" for _ in chunk)
+            tag_marks = ", ".join("?" for _ in tag_ids)
+            rows = self._conn.execute(
+                f"SELECT path, tag_id FROM photo_tags "
+                f"WHERE path IN ({path_marks}) AND tag_id IN ({tag_marks})",
+                [*chunk, *tag_ids],
+            ).fetchall()
+            result.update((row["path"], int(row["tag_id"])) for row in rows)
+        return result
 
     def _known_paths(self, paths: Sequence[str]) -> set[str]:
         known: set[str] = set()

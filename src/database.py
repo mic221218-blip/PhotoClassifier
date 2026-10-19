@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from src.photo_info import EXIF_STATUSES, PhotoInfo
+from src.paths import resolve_key
 from src.tags import PRESET_TAGS, color_for
 
 
@@ -100,6 +101,10 @@ CREATE TABLE IF NOT EXISTS folders (
     last_scanned_at TEXT
 );
 
+"""
+
+#: V2.5 质量表结构（单独抽出：QualityStore 用独立连接时也能兜底建表）。
+QUALITY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS photo_quality (
     path             TEXT PRIMARY KEY,
     analyzer_version INTEGER NOT NULL,
@@ -150,7 +155,7 @@ CREATE INDEX IF NOT EXISTS idx_photo_tags_tag ON photo_tags (tag_id);
 CREATE INDEX IF NOT EXISTS idx_photo_tags_path ON photo_tags (path);
 """
 
-_SCHEMA = _SCHEMA + TAGS_SCHEMA
+_SCHEMA = _SCHEMA + QUALITY_SCHEMA + TAGS_SCHEMA
 
 #: 当前 schema 版本（写入 ``PRAGMA user_version``，为后续迁移留钩子）。
 SCHEMA_VERSION = 2
@@ -212,7 +217,7 @@ def _photo_values(info: PhotoInfo, *, for_insert: bool) -> tuple:
     """
     now = _now()
     return (
-        str(info.path.resolve()),
+        resolve_key(info.path),
         info.file_name,
         info.category,
         info.size_bytes,
@@ -250,6 +255,8 @@ class PhotoDatabase:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         with self._conn:
             self._conn.executescript(_SCHEMA)
             current = self._conn.execute("PRAGMA user_version").fetchone()[0]
@@ -319,7 +326,7 @@ class PhotoDatabase:
 
     def get_photo(self, path: str | Path) -> PhotoInfo | None:
         """按绝对路径精确查找一条记录。"""
-        key = str(Path(path).resolve())
+        key = resolve_key(path)
         row = self._conn.execute(
             f"SELECT {', '.join(_PHOTO_COLUMNS)} FROM photos WHERE path = ?",
             (key,),
@@ -378,7 +385,7 @@ class PhotoDatabase:
 
     def add_folder(self, path: str | Path) -> None:
         """把一个文件夹加入文件夹库（已存在时忽略）。"""
-        key = str(Path(path).resolve())
+        key = resolve_key(path)
         with self._conn:
             self._conn.execute(
                 "INSERT OR IGNORE INTO folders (path, added_at) VALUES (?, ?)",
@@ -387,13 +394,13 @@ class PhotoDatabase:
 
     def remove_folder(self, path: str | Path) -> None:
         """从文件夹库移除一个文件夹（不删除照片记录，更不碰原片）。"""
-        key = str(Path(path).resolve())
+        key = resolve_key(path)
         with self._conn:
             self._conn.execute("DELETE FROM folders WHERE path = ?", (key,))
 
     def mark_folder_scanned(self, path: str | Path) -> None:
         """确保文件夹在库中，并更新其最近扫描时间。"""
-        key = str(Path(path).resolve())
+        key = resolve_key(path)
         with self._conn:
             self._conn.execute(
                 """
@@ -469,7 +476,7 @@ def _like_prefix(folder: str | Path) -> str:
     注意：路径分隔符本身也要转义（\\\\ 表示字面量 \\），
     末尾接未转义的 % 作为通配符。
     """
-    return _escape_like(str(Path(folder).resolve())) + "\\\\%"
+    return _escape_like(resolve_key(folder)) + "\\\\%"
 
 
 def _row_to_photo_info(row: sqlite3.Row) -> PhotoInfo:

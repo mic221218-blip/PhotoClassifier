@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Iterator
 
+from src.database import QUALITY_SCHEMA
+from src.paths import db_key, resolve_key
 from src.photo_info import PhotoInfo
 from src.quality import ANALYZER_VERSION, QualityMeasurement
 
@@ -72,33 +74,11 @@ class QualityStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
-        # 表由 PhotoDatabase 的 schema 创建；这里兜底建一次，保证独立使用时也可用
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
+        # 表结构唯一来源在 database.QUALITY_SCHEMA；独立使用时也在这里兜底建表
         with self._conn:
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS photo_quality (
-                    path TEXT PRIMARY KEY,
-                    analyzer_version INTEGER NOT NULL,
-                    analyzed_at TEXT NOT NULL,
-                    preview_source TEXT NOT NULL,
-                    preview_width INTEGER,
-                    preview_height INTEGER,
-                    blur_score REAL,
-                    contrast REAL,
-                    anisotropy REAL,
-                    mean_lum REAL,
-                    std_lum REAL,
-                    clip_low_frac REAL,
-                    clip_high_frac REAL,
-                    dhash TEXT,
-                    quick_hash TEXT,
-                    content_hash TEXT,
-                    file_size INTEGER,
-                    file_mtime TEXT,
-                    error TEXT
-                )
-                """
-            )
+            self._conn.executescript(QUALITY_SCHEMA)
 
     # ---- 生命周期 -------------------------------------------------------- #
 
@@ -118,7 +98,7 @@ class QualityStore:
     # ---- 写入 ------------------------------------------------------------ #
 
     def _values(self, measurement: QualityMeasurement) -> tuple:
-        path = str(Path(measurement.path).resolve())
+        path = resolve_key(measurement.path)
         analyzed_at = measurement.analyzed_at or _now()
         return (
             path,
@@ -155,7 +135,7 @@ class QualityStore:
         return written
 
     def set_content_hash(self, path: str | Path, content_hash: str) -> None:
-        key = str(Path(path).resolve())
+        key = db_key(path)
         with self._conn:
             self._conn.execute(
                 "UPDATE photo_quality SET content_hash = ? WHERE path = ?",
@@ -163,7 +143,7 @@ class QualityStore:
             )
 
     def delete(self, path: str | Path) -> None:
-        key = str(Path(path).resolve())
+        key = db_key(path)
         with self._conn:
             self._conn.execute("DELETE FROM photo_quality WHERE path = ?", (key,))
 
@@ -178,7 +158,7 @@ class QualityStore:
     # ---- 读取 ------------------------------------------------------------ #
 
     def get(self, path: str | Path) -> QualityMeasurement | None:
-        key = str(Path(path).resolve())
+        key = db_key(path)
         row = self._conn.execute(
             "SELECT * FROM photo_quality WHERE path = ?", (key,)
         ).fetchone()
@@ -228,7 +208,7 @@ class QualityStore:
             if force:
                 result.append(info)
                 continue
-            key = str(Path(info.path).resolve())
+            key = resolve_key(info.path)
             row = rows.get(key)
             if row is None:
                 result.append(info)

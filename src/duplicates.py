@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from src.paths import db_key
 from src.quality import QualityConfig, QualityMeasurement, hamming_distance
 
 
@@ -118,7 +119,8 @@ class DuplicateResult:
     by_path: Mapping[str, DuplicateInfo] = field(default_factory=dict)
 
     def info_for(self, path: str | Path) -> DuplicateInfo | None:
-        return self.by_path.get(str(Path(path).resolve()))
+        # 热路径：path 来自 photos 表，已经绝对且解析过，不再触发文件系统查询
+        return self.by_path.get(db_key(path))
 
     def flag_reason(self, path: str | Path) -> str | None:
         info = self.info_for(path)
@@ -212,7 +214,7 @@ class DuplicateFinder:
         by_path: dict[str, DuplicateInfo] = {}
         for group in duplicates:
             for index, member in enumerate(group.members):
-                by_path[str(Path(member.path).resolve())] = DuplicateInfo(
+                by_path[db_key(member.path)] = DuplicateInfo(
                     group_id=group.group_id,
                     kind=group.kind,
                     size=group.size,
@@ -382,7 +384,7 @@ def candidates_from(
     """
     result: list[DuplicateCandidate] = []
     for measurement in measurements:
-        key = str(Path(measurement.path).resolve())
+        key = db_key(measurement.path)
         info = infos.get(key)
         pixel_count = None
         taken_at = None
