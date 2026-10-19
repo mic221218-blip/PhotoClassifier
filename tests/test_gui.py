@@ -501,3 +501,162 @@ def test_open_failure_warns(root, db_path: Path, monkeypatch) -> None:
     assert warnings
     app.db.close()
     app.quality_store.close()
+
+
+# --------------------------------------------------------------------------- #
+# 用户标签（V3）
+# --------------------------------------------------------------------------- #
+
+
+def test_tag_panel_seeded_with_presets(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    assert len(app.tag_tree.get_children()) == len(app.tags_by_id) == 10
+    app.tag_store.close()
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_add_tag_updates_row_and_counts(root, db_path: Path) -> None:
+    app = seeded_app(root, db_path)
+    tag = app.tag_store.ensure_tag("建筑")
+    app.tag_store.add_tags([Path("D:/Photos/2026/a.NEF")], [tag.id])
+    app._tag_revision += 1
+    app.refresh_tags()
+    app.refresh_results()
+
+    row_values = {
+        app.result_tree.item(iid, "values")[0]: app.result_tree.item(iid, "values")
+        for iid in app.result_tree.get_children()
+    }
+    assert "★建筑" in row_values["a.NEF"][6]
+    assert "★建筑" not in row_values["b.JPG"][6]
+    assert any("建筑" in app.tag_tree.item(iid, "text") and "1" in app.tag_tree.item(iid, "text") for iid in app.tag_tree.get_children())
+
+    app.tag_store.close()
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_tag_filter_and_clear(root, db_path: Path) -> None:
+    app = seeded_app(root, db_path)
+    tag = app.tag_store.ensure_tag("建筑")
+    app.tag_store.add_tags([Path("D:/Photos/2026/a.NEF")], [tag.id])
+    app._tag_revision += 1
+    app.refresh_tags()
+    app.refresh_results()
+
+    app.active_tags.add(tag.id)
+    app._refresh_tag_list()
+    app.refresh_results()
+    assert row_names(app) == {"a.NEF"}
+
+    app.clear_filters()
+    assert row_names(app) == {"a.NEF", "b.JPG"}
+
+    app.tag_store.close()
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_detail_tag_chips_and_remove(root, db_path: Path) -> None:
+    app = seeded_app(root, db_path)
+    tag = app.tag_store.ensure_tag("天空")
+    app.tag_store.add_tags([Path("D:/Photos/2026/a.NEF")], [tag.id])
+    app._tag_revision += 1
+    app.refresh_tags()
+    app.refresh_results()
+
+    iid = str(Path("D:/Photos/2026/a.NEF").resolve())
+    app.result_tree.selection_set(iid)
+    app._on_result_select()
+    root.update()
+
+    chip_texts = []
+    for chip in app.tag_chips_frame.winfo_children():
+        labels = [child for child in chip.winfo_children() if isinstance(child, tk.Label)]
+        if labels:
+            chip_texts.append(labels[0].cget("text"))
+    assert "天空" in chip_texts
+
+    app._remove_tag_from_current(tag.id)
+    assert app.tag_store.counts().get(tag.id, 0) == 0
+
+    app.tag_store.close()
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_batch_add_tags_and_undo(root, db_path: Path, monkeypatch) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    app.db.add_folder("D:/Photos/2026")
+    app.db.upsert_many(
+        [make_info(Path("D:/Photos/2026/a.NEF")), make_info(Path("D:/Photos/2026/b.NEF"))]
+    )
+    app.checked_folders.add(str(Path("D:/Photos/2026").resolve()))
+    app.refresh_library()
+    app.refresh_results()
+
+    iids = app.result_tree.get_children()
+    app.result_tree.selection_set(iids)
+    monkeypatch.setattr(app, "_ask_tag_choice", lambda *args, **kwargs: "城市")
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    app.batch_add_tags()
+
+    tag = app.tag_store.get_by_name("城市")
+    assert app.tag_store.counts()[tag.id] == 2
+    assert app._last_tag_undo is not None
+
+    app.undo_last_tag_operation()
+    assert app.tag_store.counts().get(tag.id, 0) == 0
+
+    app.tag_store.close()
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_batch_remove_tags_and_undo(root, db_path: Path, monkeypatch) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    app.db.add_folder("D:/Photos/2026")
+    app.db.upsert_many(
+        [make_info(Path("D:/Photos/2026/a.NEF")), make_info(Path("D:/Photos/2026/b.NEF"))]
+    )
+    app.checked_folders.add(str(Path("D:/Photos/2026").resolve()))
+    app.refresh_library()
+    app.refresh_results()
+
+    tag = app.tag_store.ensure_tag("建筑")
+    app.tag_store.add_tags(
+        [Path("D:/Photos/2026/a.NEF"), Path("D:/Photos/2026/b.NEF")], [tag.id]
+    )
+    app._tag_revision += 1
+    app.refresh_tags()
+    app.refresh_results()
+
+    app.result_tree.selection_set(app.result_tree.get_children())
+    monkeypatch.setattr(app, "_ask_tag_choice", lambda *args, **kwargs: "建筑")
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    app.batch_remove_tags()
+    assert app.tag_store.counts().get(tag.id, 0) == 0
+
+    app.undo_last_tag_operation()
+    assert app.tag_store.counts()[tag.id] == 2
+
+    app.tag_store.close()
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_tag_search_filters_list(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    app.tag_search_var.set("建")
+    root.update()
+    texts = [app.tag_tree.item(iid, "text") for iid in app.tag_tree.get_children()]
+    assert len(texts) == 1 and "建筑" in texts[0]
+
+    app.tag_search_var.set("")
+    root.update()
+    assert len(app.tag_tree.get_children()) == 10
+
+    app.tag_store.close()
+    app.db.close()
+    app.quality_store.close()
