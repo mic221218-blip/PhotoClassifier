@@ -510,7 +510,7 @@ def test_open_failure_warns(root, db_path: Path, monkeypatch) -> None:
 
 def test_tag_panel_seeded_with_presets(root, db_path: Path) -> None:
     app = PhotoClassifierApp(root, db_path)
-    assert len(app.tag_tree.get_children()) == len(app.tags_by_id) == 10
+    assert len(app.tag_tree.get_children()) == len(app.tag_controller.tags_by_id) == 10
     app.tag_store.close()
     app.db.close()
     app.quality_store.close()
@@ -520,7 +520,7 @@ def test_add_tag_updates_row_and_counts(root, db_path: Path) -> None:
     app = seeded_app(root, db_path)
     tag = app.tag_store.ensure_tag("建筑")
     app.tag_store.add_tags([Path("D:/Photos/2026/a.NEF")], [tag.id])
-    app._tag_revision += 1
+    app.tag_controller.mark_dirty()
     app.refresh_tags()
     app.refresh_results()
 
@@ -541,7 +541,7 @@ def test_tag_filter_and_clear(root, db_path: Path) -> None:
     app = seeded_app(root, db_path)
     tag = app.tag_store.ensure_tag("建筑")
     app.tag_store.add_tags([Path("D:/Photos/2026/a.NEF")], [tag.id])
-    app._tag_revision += 1
+    app.tag_controller.mark_dirty()
     app.refresh_tags()
     app.refresh_results()
 
@@ -562,7 +562,7 @@ def test_detail_tag_chips_and_remove(root, db_path: Path) -> None:
     app = seeded_app(root, db_path)
     tag = app.tag_store.ensure_tag("天空")
     app.tag_store.add_tags([Path("D:/Photos/2026/a.NEF")], [tag.id])
-    app._tag_revision += 1
+    app.tag_controller.mark_dirty()
     app.refresh_tags()
     app.refresh_results()
 
@@ -604,7 +604,7 @@ def test_batch_add_tags_and_undo(root, db_path: Path, monkeypatch) -> None:
 
     tag = app.tag_store.get_by_name("城市")
     assert app.tag_store.counts()[tag.id] == 2
-    assert app._last_tag_undo is not None
+    assert app.tag_controller.undo_available
 
     app.undo_last_tag_operation()
     assert app.tag_store.counts().get(tag.id, 0) == 0
@@ -628,7 +628,7 @@ def test_batch_remove_tags_and_undo(root, db_path: Path, monkeypatch) -> None:
     app.tag_store.add_tags(
         [Path("D:/Photos/2026/a.NEF"), Path("D:/Photos/2026/b.NEF")], [tag.id]
     )
-    app._tag_revision += 1
+    app.tag_controller.mark_dirty()
     app.refresh_tags()
     app.refresh_results()
 
