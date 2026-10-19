@@ -31,7 +31,7 @@ Lightroom 等后期软件。
 5. **AI 是可插拔的增强，不是核心依赖。** 能用 EXIF 和规则解决的，不引入 AI；
    未来的视觉识别再按需加入。
 
-## 当前功能（V2.5）
+## 当前功能（V3）
 
 ### V1：文件扫描与 NEF 基础支持 ✅
 
@@ -69,7 +69,9 @@ Lightroom 等后期软件。
 - **质量分析**：左侧「质量分析（V2.5）」复选框（模糊 / 运动模糊 / 过曝 /
   欠曝 / 黑屏 / 重复）与自动标签共用 并且/或者；结果表「质量」列、
   详情面板「质量分析」块（清晰度、对比度、亮度、高光/暗部截断、重复组）；
-- **占位控件**：标签筛选（V3）、参数条件（V4）、导出 / 导入到 Lightroom（V5）
+- **我的标签（V3）**：左侧搜索 + 勾选列表（带照片数）；详情面板 chips 编辑；
+  结果行右键批量添加/移除、单步撤销；标签管理对话框；
+- **占位控件**：参数条件（V4）、导出 / 导入到 Lightroom（V5）
   均已画出并禁用，随版本接入；
 - 窗口默认 1660×900；左右面板内容超出时可滚动（鼠标滚轮）；
 - 启动方式：桌面快捷方式（指向 `run_gui.pyw`），或
@@ -91,7 +93,7 @@ Lightroom 等后期软件。
   结果列表新增「自动标签」列（chips）；详情面板显示「规则命中」原因；
   支持「有 GPS 坐标」筛选。
 
-### V2.5：图像质量分析 ✅（当前版本）
+### V2.5：图像质量分析 ✅
 
 项目**第一次读取像素**。`analyze` 时把画质测量写进数据库，判定仍然是实时的——
 改阈值不需要重新解码图片。
@@ -115,6 +117,28 @@ Lightroom 等后期软件。
   （后台线程 + 进度 + 可取消 + 增量）；
 - **可选依赖**：质量分析需要 Pillow（`requirements-quality.txt`）；没安装时
   扫描、EXIF、规则分类与规则筛选**完全不受影响**。
+
+### V3：多标签系统 ✅（当前版本）
+
+每张照片可以拥有任意多个**扁平标签**：规则/质量是系统标签（实时派生），
+用户标签持久化在 SQLite，两者在界面与筛选里统一使用。
+
+- **数据模型**：新增 `tags` + `photo_tags`（schema `1 → 2`，纯加法迁移）；
+  名称大小写不敏感唯一、自动配色、删除标签会级联移除关联（不删照片）；
+- **单张编辑**：详情面板「我的标签」彩色 chips + 输入框 + 自动补全；
+  点 × 移除；输入新名称时确认后创建；
+- **批量**：结果表多选 + 右键菜单（打开图片 / 打开文件位置 / 添加标签… /
+  移除标签… / 复制路径），操作前显示数量，完成后可用 **Ctrl+Z 单步撤销**；
+- **筛选**：左栏「我的标签」支持搜索、勾选、显示照片数；与规则/质量共用
+  同一个「并且 / 或者」（统一实现在 `src/filtering.py`）；
+- **展示**：结果列里用户标签以 `★` 前缀排在最前，
+  例如 `★建筑 ｜ 夜景 · 慢门`（保证用户标签不会被长名称挤掉）；
+  详情面板使用彩色 chips；
+- **管理**：标签管理对话框（新建 / 重命名 / 删除，删除前显示影响数量）；
+- **预置标签**：首次升级预置 10 个常用标签（风光/建筑/夜景/人物/天空/水面/
+  城市/运动/花卉/日落），不自动打标，可删除；
+- **CLI**：`tags`、`tag add/remove/list/rename/delete`、`filter --tags`；
+  `show` 会显示照片的标签。
 
 ## 安装与使用
 
@@ -162,6 +186,16 @@ python -m src.main dupes --sequences
 
 # 11. 安装 / 更新桌面快捷方式（Windows）
 python tools/install_shortcut.py
+
+# 12. 用户标签（V3）
+python -m src.main tags
+python -m src.main tag add --tag 建筑 --tag 待修 "D:\Photos\2026\DSC_0012.NEF"
+python -m src.main tag add --tag 建筑 --match 金鸡湖
+python -m src.main tag list --tag 建筑
+python -m src.main filter --tags 建筑
+python -m src.main filter --rules night --tags 建筑
+python -m src.main tag rename 待修 待精修
+python -m src.main tag delete 待精修 --yes
 ```
 
 `scan` 的输出报告（对应规划文档的容错设计）：
@@ -239,7 +273,7 @@ python tools/install_shortcut.py
 python -m pytest
 ```
 
-测试共 **233 个**。扫描、EXIF、规则、数据库、CLI 测试全部使用按
+测试共 **298 个**。扫描、EXIF、规则、数据库、CLI 测试全部使用按
 TIFF / EXIF / PNG 规范合成的临时文件（`tests/exif_maker.py`）；质量分析测试用
 Pillow 现画的小图（`tests/image_maker.py`），并覆盖 NEF 内嵌预览、模糊/曝光/
 重复分组与延时序列豁免；GUI 测试在后台构建真实窗口（不进入主循环、不弹窗）。
@@ -260,6 +294,9 @@ PhotoClassifier/
 │   ├── duplicates.py    # V2.5：精确/近似重复 + 延时序列识别（纯函数）
 │   ├── quality_store.py # V2.5：photo_quality 表读写
 │   ├── quality_scan.py  # V2.5：分析流程编排（增量 / 并发 / 哈希 / 报告）
+│   ├── tags.py          # V3：标签规范化 / 颜色 / 预置列表（纯函数）
+│   ├── tag_store.py     # V3：tags / photo_tags 持久化
+│   ├── filtering.py     # V3：规则 + 质量 + 标签 + GPS 的统一筛选
 │   ├── formatting.py    # 通用显示格式化（CLI / GUI / 规则共用）
 │   ├── main.py          # CLI 入口（scan / show / stats / classify / filter / analyze / quality / dupes）
 │   └── gui.py           # GUI：图形界面外壳（Tkinter，含规则与质量筛选）
@@ -273,6 +310,10 @@ PhotoClassifier/
 │   ├── test_duplicates.py   # 精确 / 近似重复 / 延时序列测试
 │   ├── test_quality_store.py# 质量表读写与 schema 迁移测试
 │   ├── test_quality_cli.py  # analyze / quality / dupes / filter --quality 测试
+│   ├── test_tags.py         # 标签名规范化 / 颜色测试
+│   ├── test_tag_store.py    # 标签 CRUD / 级联 / 迁移测试
+│   ├── test_filtering.py    # 统一筛选矩阵测试
+│   ├── test_tag_cli.py      # tags / tag / filter --tags 测试
 │   ├── test_main.py         # CLI 与整体流程集成测试
 │   ├── test_gui.py          # GUI 外壳测试（含规则与质量筛选）
 │   ├── exif_maker.py        # 合成 NEF/JPEG/PNG 测试文件的辅助模块
@@ -300,6 +341,10 @@ PhotoClassifier/
 | 质量结果存储 | 只存**测量值**，判定实时计算 | 与 V2"规则不落库"同构：改阈值不用重算像素；`photo_quality` 表独立于 `photos`，零迁移风险 |
 | 图像解码 | Pillow 作为**可选依赖**，只出现在 `preview.py` | 成熟、纯 wheel、支持 JPEG `draft()` 降采样；缺失时核心功能不受影响 |
 | 重复照片 | 精确（整文件哈希）+ 近似（dHash + 时间窗）+ 序列豁免 | 真实延时素材里"相似帧"是正常拍摄节奏，不能当重复；同名 RAW+JPEG 也豁免 |
+| 标签存储 | 用户标签入库，系统标签（规则/质量）实时派生 | 改阈值立即生效、不产生过期标签；V3.5 模型标签可用同一张表存 |
+| 标签结构 | 扁平的 `tags` + `photo_tags` | V3 先做扎实；层级/表达式留给 V4 |
+| 标签筛选 | 规则 + 质量 + 标签共用 `FilterSelection` | GUI 与 CLI 行为一致，V4 扩展数值条件即可 |
+| 标签写入 | 只写数据库，不写 EXIF/XMP | 原片安全；XMP/关键词导出留到 V5 |
 
 ## 开发路线图
 
@@ -309,8 +354,8 @@ PhotoClassifier/
 | V1 | 文件扫描与 NEF 基础支持（类型识别、容错、报告） | ✅ 完成 |
 | V1.5 | EXIF 与照片信息（解析器、数据库、CLI） | ✅ 完成 |
 | V2 | 规则分类（夜景 / 高感 / 慢门 / 长焦 / 广角 / 大光圈；CLI + GUI 筛选） | ✅ 完成 |
-| V2.5 | 图像质量分析（模糊 / 运动模糊 / 曝光异常 / 黑屏 / 重复 / 延时序列；CLI + GUI，仅提示不删除） | ✅ 完成（当前） |
-| V3 | 多标签系统（#夜景 #建筑 …，一张照片多个标签） | 计划中 |
+| V2.5 | 图像质量分析（模糊 / 运动模糊 / 曝光异常 / 黑屏 / 重复 / 延时序列；CLI + GUI，仅提示不删除） | ✅ 完成 |
+| V3 | 多标签系统（用户标签 + 规则/质量系统标签、统一筛选、批量与撤销；CLI + GUI） | ✅ 完成（当前） |
 | V3.5 | 视觉识别（比较传统 CV / 本地模型 / AI API） | 计划中 |
 | V4 | 智能筛选（标签 + EXIF 条件的 AND / OR 组合） | 计划中 |
 | V5 | Lightroom 工作流（打开文件位置 / 批量路径 / 导出到文件夹） | 计划中 |
@@ -331,6 +376,17 @@ PhotoClassifier/
 
 > 模糊 38 张经人工抽查确认是真实问题（其中一张是对着椅背的误触、其余是
 > 慢门下明显发虚的帧）；延时序列没有被误报成"重复照片"。
+
+V3 标签性能（10,000 张照片 / 50,000 条关联，合成基准）：
+
+| 项目 | 结果 |
+| --- | --- |
+| 标签关联缓存加载 + 路径映射 | 47.5 ms |
+| 10,000 张规则 + 标签筛选 | 8.2 ms |
+| 标签计数（GROUP BY） | 1.2 ms |
+
+> 关键优化：数据库里的路径已经是绝对路径，筛选热路径不再对每张照片调用
+> `Path.resolve()`（否则 1 万张会多花约 2.7 秒）。
 
 ## 原始照片安全原则
 

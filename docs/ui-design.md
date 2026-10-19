@@ -108,6 +108,11 @@ dependency so the core stays dependency-free.
 
 ## 8. Changelog
 
+- r6 (2026-10-20): V3 tags — "My tags" in the left panel (search + checkbox list +
+  photo counts + manager entry); user tags merged into the "Auto tags" column with
+  a ★ prefix at the front, with small column-width adjustments; a chip editor
+  (input + autocomplete) in the detail panel; right-click batch add/remove with
+  Ctrl+Z undo; a tag manager dialog (create/rename/delete).
 - r5 (2026-10-19): V2.5 wiring — six "Quality analysis" checkboxes in the left
   panel (sharing AND/OR with auto tags); a "Quality" column in the result table;
   a "Quality analysis" block in the detail panel (sharpness, contrast,
