@@ -327,7 +327,7 @@ path to the clipboard so you can paste it into Explorer's address bar.
 python -m pytest
 ```
 
-The suite contains **298 tests**. Scanning, EXIF, rules, database and CLI tests
+The suite contains **310 tests**. Scanning, EXIF, rules, database and CLI tests
 use temporary files synthesized to the TIFF / EXIF / PNG specifications
 (`tests/exif_maker.py`); quality tests draw small images with Pillow
 (`tests/image_maker.py`) and cover NEF embedded previews, blur/exposure,
@@ -351,11 +351,18 @@ PhotoClassifier/
 │   ├── quality_store.py # V2.5: photo_quality table persistence
 │   ├── quality_scan.py  # V2.5: analysis pipeline (incremental / concurrent / hashing / report)
 │   ├── tags.py          # V3: tag normalization / colours / presets (pure)
-│   ├── tag_store.py     # V3: tags / photo_tags persistence
+│   ├── tag_store.py     # V3: tags / photo_tags persistence (batch writes)
+│   ├── tag_controller.py# V3: tag cache / batch ops / single-step undo (pure)
+│   ├── tag_cli.py       # V3: tags / tag subcommands
 │   ├── filtering.py     # V3: unified rules + quality + tags + GPS filtering
+│   ├── paths.py         # unified path keys (no resolve in hot paths)
 │   ├── formatting.py    # shared display formatting (CLI / GUI / rules)
-│   ├── main.py          # CLI entry point (scan / show / stats / classify / filter / analyze / quality / dupes)
-│   └── gui.py           # GUI: graphical shell (Tkinter, rules + quality filtering)
+│   ├── main.py          # CLI entry + command dispatch table
+│   ├── ui_theme.py      # GUI theme / columns / pure display helpers
+│   ├── ui_panels.py     # GUI layout builders (toolbar / panels / result table)
+│   ├── ui_detail.py     # detail panel refresh + tag chip editor
+│   ├── ui_tag_dialogs.py# tag picker / batch ops / tag manager dialogs
+│   └── gui.py           # GUI entry + state orchestration (Tkinter)
 ├── tests/
 │   ├── test_scanner.py      # V1 scanner tests
 │   ├── test_exif_reader.py  # EXIF parsing tests (incl. corrupted-file tolerance)
@@ -370,6 +377,9 @@ PhotoClassifier/
 │   ├── test_tag_store.py    # tag CRUD / cascade / migration tests
 │   ├── test_filtering.py    # unified filter matrix tests
 │   ├── test_tag_cli.py      # tags / tag / filter --tags tests
+│   ├── test_tag_controller.py # tag cache / batch / undo tests
+│   ├── test_paths.py        # path key tests
+│   ├── test_perf_regressions.py # resolve hot-path / WAL regression tests
 │   ├── test_main.py         # CLI & end-to-end integration tests
 │   ├── test_gui.py          # GUI shell tests (incl. rule and quality filtering)
 │   ├── exif_maker.py        # helper to synthesize NEF/JPEG/PNG test files
@@ -435,17 +445,21 @@ renaming, and more.
 > shot of a chair back; the rest clearly soft at slow shutter speeds), and the
 > timelapse frames were not misreported as duplicates.
 
-V3 tag performance (10,000 photos / 50,000 assignments, synthetic benchmark):
+V3 / P0 performance (10,000 photos / 50,000 assignments, synthetic benchmark):
 
 | Item | Result |
 | --- | --- |
-| Tag assignment cache + path mapping | 47.5 ms |
-| Rules + tags filtering over 10,000 photos | 8.2 ms |
-| Tag counts (GROUP BY) | 1.2 ms |
+| Tag assignment cache + path mapping | ~114 ms |
+| Rules + tags filtering over 10,000 photos | ~11 ms |
+| Tag counts (GROUP BY) | ~4 ms |
+| Tag one tag onto 1,000 photos | ~21 ms |
+| Insert 50,000 assignments in batches | ~22 ms |
+| GUI filter refresh (1,375 rows) | ~40 ms |
 
-> Key optimization: database paths are already absolute, so the filtering hot
-> path no longer calls `Path.resolve()` per photo (that alone cost ~2.7 s for
-> 10,000 photos).
+> Key optimizations: database paths are already absolute, so the filtering hot
+> path no longer calls `Path.resolve()` per photo (a GUI refresh used to spend
+> ~250 ms of 260 ms there); batch tag writes use `executemany` (50k assignments
+> dropped from ~2.9 s to ~22 ms).
 
 ## Original-Photo Safety Principles
 

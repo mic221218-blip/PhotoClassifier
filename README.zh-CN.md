@@ -273,7 +273,7 @@ python tools/install_shortcut.py
 python -m pytest
 ```
 
-测试共 **298 个**。扫描、EXIF、规则、数据库、CLI 测试全部使用按
+测试共 **310 个**。扫描、EXIF、规则、数据库、CLI 测试全部使用按
 TIFF / EXIF / PNG 规范合成的临时文件（`tests/exif_maker.py`）；质量分析测试用
 Pillow 现画的小图（`tests/image_maker.py`），并覆盖 NEF 内嵌预览、模糊/曝光/
 重复分组与延时序列豁免；GUI 测试在后台构建真实窗口（不进入主循环、不弹窗）。
@@ -295,11 +295,18 @@ PhotoClassifier/
 │   ├── quality_store.py # V2.5：photo_quality 表读写
 │   ├── quality_scan.py  # V2.5：分析流程编排（增量 / 并发 / 哈希 / 报告）
 │   ├── tags.py          # V3：标签规范化 / 颜色 / 预置列表（纯函数）
-│   ├── tag_store.py     # V3：tags / photo_tags 持久化
+│   ├── tag_store.py     # V3：tags / photo_tags 持久化（批量写入）
+│   ├── tag_controller.py# V3：标签缓存 / 批量操作 / 单步撤销（纯逻辑）
+│   ├── tag_cli.py       # V3：tags / tag 子命令
 │   ├── filtering.py     # V3：规则 + 质量 + 标签 + GPS 的统一筛选
+│   ├── paths.py         # 路径 key 统一（热路径不做 resolve）
 │   ├── formatting.py    # 通用显示格式化（CLI / GUI / 规则共用）
-│   ├── main.py          # CLI 入口（scan / show / stats / classify / filter / analyze / quality / dupes）
-│   └── gui.py           # GUI：图形界面外壳（Tkinter，含规则与质量筛选）
+│   ├── main.py          # CLI 入口 + 分发表（scan…filter/analyze/quality/dupes/tags/tag）
+│   ├── ui_theme.py      # GUI 主题 / 列定义 / 纯显示辅助
+│   ├── ui_panels.py     # GUI 布局构建（工具栏 / 左右面板 / 结果表）
+│   ├── ui_detail.py     # 详情面板刷新与标签 chips 编辑
+│   ├── ui_tag_dialogs.py# 标签选择 / 批量操作 / 标签管理对话框
+│   └── gui.py           # GUI 入口与状态编排（Tkinter）
 ├── tests/
 │   ├── test_scanner.py      # V1 扫描器测试
 │   ├── test_exif_reader.py  # EXIF 解析测试（含损坏文件容错）
@@ -314,6 +321,9 @@ PhotoClassifier/
 │   ├── test_tag_store.py    # 标签 CRUD / 级联 / 迁移测试
 │   ├── test_filtering.py    # 统一筛选矩阵测试
 │   ├── test_tag_cli.py      # tags / tag / filter --tags 测试
+│   ├── test_tag_controller.py # 标签缓存 / 批量 / 撤销测试
+│   ├── test_paths.py        # 路径 key 测试
+│   ├── test_perf_regressions.py # resolve 热路径 / WAL 回归测试
 │   ├── test_main.py         # CLI 与整体流程集成测试
 │   ├── test_gui.py          # GUI 外壳测试（含规则与质量筛选）
 │   ├── exif_maker.py        # 合成 NEF/JPEG/PNG 测试文件的辅助模块
@@ -377,16 +387,20 @@ PhotoClassifier/
 > 模糊 38 张经人工抽查确认是真实问题（其中一张是对着椅背的误触、其余是
 > 慢门下明显发虚的帧）；延时序列没有被误报成"重复照片"。
 
-V3 标签性能（10,000 张照片 / 50,000 条关联，合成基准）：
+V3 / P0 性能（10,000 张照片 / 50,000 条关联，合成基准）：
 
 | 项目 | 结果 |
 | --- | --- |
-| 标签关联缓存加载 + 路径映射 | 47.5 ms |
-| 10,000 张规则 + 标签筛选 | 8.2 ms |
-| 标签计数（GROUP BY） | 1.2 ms |
+| 标签关联缓存加载 + 路径映射 | 约 114 ms |
+| 10,000 张规则 + 标签筛选 | 约 11 ms |
+| 标签计数（GROUP BY） | 约 4 ms |
+| 给 1,000 张照片打一个标签 | 约 21 ms |
+| 给 50,000 条关联批量打标签 | 约 22 ms |
+| GUI 筛选刷新（1,375 行） | 约 40 ms |
 
 > 关键优化：数据库里的路径已经是绝对路径，筛选热路径不再对每张照片调用
-> `Path.resolve()`（否则 1 万张会多花约 2.7 秒）。
+> `Path.resolve()`（此前一次 GUI 刷新 260ms，其中约 250ms 花在这里）；
+> 标签批量写入改为 `executemany`（5 万条从约 2.9 秒降到约 22ms）。
 
 ## 原始照片安全原则
 
@@ -399,4 +413,4 @@ V3 标签性能（10,000 张照片 / 50,000 条关联，合成基准）：
 
 ---
 
-*项目总体规划与开发路线详见内部设计文档《PhotoClassifier 项目总体规划与开发路线》，及各阶段方案：`docs/v2-plan.zh-CN.md`、`docs/v2.5-plan.zh-CN.md`。*
+*项目总体规划与开发路线详见内部设计文档《PhotoClassifier 项目总体规划与开发路线》，及各阶段方案：`docs/v2-plan.zh-CN.md`、`docs/v2.5-plan.zh-CN.md`、`docs/v3-plan.zh-CN.md`。*
