@@ -24,6 +24,7 @@ from pathlib import Path
 
 from src.database import PhotoDatabase
 from src.exif_reader import read_photo_info
+from src.filtering import FilterSelection, matches as selection_matches
 from src.formatting import format_shutter, format_size
 from src.photo_info import (
     EXIF_ERROR,
@@ -49,6 +50,8 @@ from src.quality_scan import (
 )
 from src.quality_store import QualityStore
 from src.rules import RuleEngine, RuleMatch
+from src.tag_store import Tag, TagStore
+from src.tags import TagConflict, TagError
 from src.scanner import (
     CATEGORY_JPEG,
     CATEGORY_NEF,
@@ -286,6 +289,195 @@ def format_stats(db_path: str | Path) -> str:
 
     return "\n".join(lines)
 
+
+
+# --------------------------------------------------------------------------- #
+# 标签（V3）
+# --------------------------------------------------------------------------- #
+
+
+def _resolve_tags(db_path: str | Path, raw: str) -> list[Tag]:
+    """把逗号分隔的标签名解析成标签对象；未知名称给出可读错误。"""
+    names = [part.strip() for part in raw.split(",") if part.strip()]
+    if not names:
+        raise SystemExit("标签不能为空")
+    with TagStore.open(db_path) as store:
+        tags = [store.get_by_name(name) for name in names]
+    missing = [name for name, tag in zip(names, tags) if tag is None]
+    if missing:
+        raise SystemExit(
+            "未知标签 " + "、".join(missing) + "（先用 `tags` 查看已有标签）"
+        )
+    return [tag for tag in tags if tag is not None]
+
+
+def _selected_photos(database: PhotoDatabase, paths: list[str], match: str):
+    """按显式路径或模糊匹配取出照片；返回 (照片列表, 未知路径列表)。"""
+    if paths:
+        selected: list[PhotoInfo] = []
+        missing: list[str] = []
+        for raw in paths:
+            info = database.get_photo(raw)
+            if info is None:
+                missing.append(raw)
+            else:
+                selected.append(info)
+        return selected, missing
+    if match:
+        return database.find_photos(match, limit=20000), []
+    return [], []
+
+
+def format_tags_report(db_path: str | Path, *, limit: int = 50) -> str:
+    """`tags` 命令：标签统计。"""
+    with TagStore.open(db_path) as store:
+        tags = store.list_tags()
+        counts = store.counts()
+        total_assignments = store.count_assignments()
+    if not tags:
+        return "（还没有标签，用 `tag add` 创建）"
+    lines = [f"标签：{len(tags)} 个 · 关联 {total_assignments:,} 条"]
+    for tag in tags[:limit]:
+        lines.append(f"  {tag.name}：{counts.get(tag.id, 0):,} 张（{tag.kind}）")
+    if len(tags) > limit:
+        lines.append(f"  ……以及另外 {len(tags) - limit} 个（用 --limit 调整）")
+    return "\n".join(lines)
+
+
+def _cmd_tag_add(args) -> int:
+    with PhotoDatabase.open(args.db) as database:
+        photos, missing = _selected_photos(database, args.paths, args.match)
+    if missing:
+        print("以下路径不在照片库中（先运行 scan）：")
+        for item in missing:
+            print(f"  {item}")
+        return 1
+    if not photos:
+        print("（没有匹配的照片）")
+        return 1
+
+    created: list[str] = []
+    added_pairs = []
+    with TagStore.open(args.db) as store:
+        tags: list[Tag] = []
+        for name in args.tag:
+            existing = store.get_by_name(name)
+            if existing is None:
+                tag = store.create_tag(name)
+                created.append(tag.name)
+            else:
+                tag = existing
+            tags.append(tag)
+        print(f"匹配照片：{len(photos):,} 张")
+        added_pairs, unknown = store.add_tags(
+            [info.path for info in photos], [tag.id for tag in tags]
+        )
+        if unknown:
+            print(f"跳过 {len(unknown)} 个不在照片库中的路径")
+        counts = store.counts()
+        tag_names = "、".join(tag.name for tag in tags)
+    if created:
+        print("新建标签：" + "、".join(created))
+    print(f"已给 {len(photos):,} 张照片添加标签「{tag_names}」：新增 {len(added_pairs):,} 条关联")
+    print(
+        "当前关联数："
+        + " · ".join(f"{tag.name} {counts.get(tag.id, 0):,}" for tag in tags)
+    )
+    return 0
+
+
+def _cmd_tag_remove(args) -> int:
+    with TagStore.open(args.db) as store:
+        tags: list[Tag] = []
+        for name in args.tag:
+            tag = store.get_by_name(name)
+            if tag is None:
+                print(f"标签不存在：{name}")
+                return 2
+            tags.append(tag)
+    with PhotoDatabase.open(args.db) as database:
+        photos, missing = _selected_photos(database, args.paths, args.match)
+    if missing:
+        print("以下路径不在照片库中（先运行 scan）：")
+        for item in missing:
+            print(f"  {item}")
+        return 1
+    if not photos:
+        print("（没有匹配的照片）")
+        return 1
+    with TagStore.open(args.db) as store:
+        removed = store.remove_tags(
+            [info.path for info in photos], [tag.id for tag in tags]
+        )
+    names = "、".join(tag.name for tag in tags)
+    print(f"已从 {len(photos):,} 张照片移除标签「{names}」：删除 {len(removed):,} 条关联")
+    return 0
+
+
+def _cmd_tag_list(args) -> int:
+    with PhotoDatabase.open(args.db) as database, TagStore.open(args.db) as store:
+        if args.tag:
+            tag = store.get_by_name(args.tag)
+            if tag is None:
+                print(f"标签不存在：{args.tag}")
+                return 2
+            paths = store.photos_with_tag(tag.id)
+            print(f"标签「{tag.name}」：{len(paths):,} 张")
+            for path in paths:
+                print(path)
+            return 0
+        photos, missing = _selected_photos(database, args.paths, args.match)
+        if missing:
+            for item in missing:
+                print(f"不在照片库中：{item}")
+            return 1
+        if not photos:
+            print("（没有匹配的照片）")
+            return 1
+        tags_by_path = store.tags_for_paths(info.path for info in photos)
+        for info in photos:
+            tags = tags_by_path.get(str(info.path), [])
+            names = "、".join(tag.name for tag in tags) if tags else "（无标签）"
+            print(f"{info.file_name}：{names}")
+    return 0
+
+
+def _cmd_tag_rename(args) -> int:
+    with TagStore.open(args.db) as store:
+        tag = store.get_by_name(args.old)
+        if tag is None:
+            print(f"标签不存在：{args.old}")
+            return 2
+        try:
+            updated = store.rename_tag(tag.id, args.new)
+        except TagError as exc:
+            print(str(exc))
+            return 2
+    print(f"已重命名：{tag.name} → {updated.name}")
+    return 0
+
+
+def _cmd_tag_delete(args) -> int:
+    with TagStore.open(args.db) as store:
+        tag = store.get_by_name(args.name)
+        if tag is None:
+            print(f"标签不存在：{args.name}")
+            return 2
+        affected = len(store.photos_with_tag(tag.id))
+        if not args.yes:
+            print(
+                f"标签「{tag.name}」将从 {affected:,} 张照片移除（不会删除照片）。\n"
+                f"确认删除请加 --yes"
+            )
+            return 1
+        removed = store.delete_tag(tag.id)
+    print(f"已删除标签「{tag.name}」，移除 {removed:,} 条关联")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# 筛选入口
+# --------------------------------------------------------------------------- #
 
 # --------------------------------------------------------------------------- #
 # 规则分类（V2）
@@ -592,47 +784,65 @@ def run_filter(
     gps_only: bool = False,
     limit: int = 0,
     quality_ids: list[str] | None = None,
+    tag_ids: list[int] | None = None,
     strict: bool = False,
-) -> list[tuple[PhotoInfo, list[RuleMatch], list[QualityFlag]]]:
-    """按规则与质量标记筛选照片，返回 (照片, 规则命中, 质量标记) 的列表。"""
+) -> list[tuple[PhotoInfo, list[RuleMatch], list[QualityFlag], list[Tag]]]:
+    """按规则 / 质量 / 用户标签筛选照片。
+
+    返回 ``(照片, 规则命中, 质量标记, 用户标签)`` 的列表。
+    """
     engine = RuleEngine()
     quality_engine = QualityEngine()
     duplicate_config = QualityConfig()
     if strict:
         duplicate_config = duplicate_config.with_config(sequence_folder_mode=False)
-    selected = set(rule_ids or []) | set(quality_ids or [])
-    matched: list[tuple[PhotoInfo, list[RuleMatch], list[QualityFlag]]] = []
+    selection = FilterSelection(
+        rule_ids=frozenset(rule_ids or ()),
+        quality_ids=frozenset(quality_ids or ()),
+        tag_ids=frozenset(tag_ids or ()),
+        and_mode=use_and,
+        gps_only=gps_only,
+    )
+    if selection.is_empty:
+        # 调用方应提前报错；这里防御性返回空
+        return []
+
+    matched: list[tuple[PhotoInfo, list[RuleMatch], list[QualityFlag], list[Tag]]] = []
 
     with PhotoDatabase.open(db_path) as database:
         photos = list(database.iter_photos())
         with QualityStore.open(db_path) as store:
             measurements = {item.path: item for item in store.iter_measurements()}
             duplicates = rebuild_duplicates(store, photos, duplicate_config)
+        with TagStore.open(db_path) as tag_store:
+            tags_by_path = tag_store.tags_for_paths(info.path for info in photos)
 
     for info in photos:
-        if gps_only and not info.has_gps:
-            continue
-        matches = engine.evaluate(info)
-        hits = {match.rule_id for match in matches}
+        rule_matches = engine.evaluate(info)
+        rule_hits = {match.rule_id for match in rule_matches}
 
         quality_flags: list[QualityFlag] = []
-        measurement = measurements.get(str(info.path.resolve()))
+        measurement = measurements.get(str(info.path))
         if measurement is not None and measurement.analyzed:
             quality_flags = quality_engine.flags(measurement, info)
         reason = duplicates.flag_reason(info.path)
         if reason:
             quality_flags.append(QualityFlag("duplicate", FLAG_LABELS["duplicate"], reason))
-        hits |= {flag.flag_id for flag in quality_flags}
+        quality_hits = {flag.flag_id for flag in quality_flags}
 
-        if selected:
-            ok = selected.issubset(hits) if use_and else bool(selected & hits)
-            if not ok:
-                continue
-        elif not gps_only:
-            # 既没有规则、也没有质量条件和 GPS：调用方应提前报错
-            return []
+        user_tags = tags_by_path.get(str(info.path), [])
+        tag_hits = {tag.id for tag in user_tags}
 
-        matched.append((info, matches, quality_flags))
+        if not selection_matches(
+            info,
+            rule_hits=rule_hits,
+            quality_hits=quality_hits,
+            tag_hits=tag_hits,
+            selection=selection,
+        ):
+            continue
+
+        matched.append((info, rule_matches, quality_flags, user_tags))
 
     if limit > 0:
         matched = matched[:limit]
@@ -647,7 +857,7 @@ def run_filter(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="photoclassifier",
-        description="PhotoClassifier：面向摄影工作流的 RAW 照片整理与筛选工具（当前版本 V2.5）",
+        description="PhotoClassifier：面向摄影工作流的 RAW 照片整理与筛选工具（当前版本 V3）",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -679,6 +889,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--quality",
         default="",
         help="逗号分隔的质量标记，如 blurry,duplicate（见 quality）",
+    )
+    filter_parser.add_argument(
+        "--tags",
+        default="",
+        help="逗号分隔的用户标签，如 建筑,天空（见 tags）",
     )
     filter_parser.add_argument(
         "--or", dest="or_", action="store_true", help="条件之间用 OR（默认 AND）"
@@ -718,6 +933,43 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict", action="store_true", help="严格模式：延时文件夹里的相似照片也按重复处理"
     )
 
+    tags_parser = subparsers.add_parser("tags", help="查看用户标签统计")
+    tags_parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
+    tags_parser.add_argument("--limit", type=int, default=50, help="最多显示多少个标签")
+
+    tag_parser = subparsers.add_parser(
+        "tag", help="管理用户标签（add / remove / list / rename / delete）"
+    )
+    tag_sub = tag_parser.add_subparsers(dest="tag_command", required=True)
+
+    tag_add = tag_sub.add_parser("add", help="给照片添加标签（不存在则创建）")
+    tag_add.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
+    tag_add.add_argument("--tag", action="append", required=True, help="标签名，可重复")
+    tag_add.add_argument("paths", nargs="*", help="照片路径（必须在数据库里）")
+    tag_add.add_argument("--match", default="", help="按文件名/路径模糊选择照片")
+
+    tag_remove = tag_sub.add_parser("remove", help="从照片移除标签")
+    tag_remove.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
+    tag_remove.add_argument("--tag", action="append", required=True, help="标签名，可重复")
+    tag_remove.add_argument("paths", nargs="*", help="照片路径（必须在数据库里）")
+    tag_remove.add_argument("--match", default="", help="按文件名/路径模糊选择照片")
+
+    tag_list = tag_sub.add_parser("list", help="查看照片的标签")
+    tag_list.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
+    tag_list.add_argument("paths", nargs="*", help="照片路径")
+    tag_list.add_argument("--match", default="", help="按文件名/路径模糊选择照片")
+    tag_list.add_argument("--tag", default="", help="列出拥有该标签的照片")
+
+    tag_rename = tag_sub.add_parser("rename", help="重命名标签")
+    tag_rename.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
+    tag_rename.add_argument("old", help="旧名称")
+    tag_rename.add_argument("new", help="新名称")
+
+    tag_delete = tag_sub.add_parser("delete", help="删除标签及其全部关联")
+    tag_delete.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
+    tag_delete.add_argument("name", help="标签名")
+    tag_delete.add_argument("--yes", action="store_true", help="确认删除")
+
     return parser
 
 
@@ -748,11 +1000,33 @@ def main(argv: list[str] | None = None) -> int:
         if not photos:
             print("（数据库中没有匹配的记录）")
             return 1
+        with TagStore.open(args.db) as tag_store:
+            tags_by_path = tag_store.tags_for_paths(info.path for info in photos)
         for index, info in enumerate(photos):
             if index:
                 print()
             print_photo_info(info)
+            tags = tags_by_path.get(str(info.path), [])
+            if tags:
+                print("  标签：" + "、".join(tag.name for tag in tags))
         return 0
+
+    if args.command == "tags":
+        print(format_tags_report(args.db, limit=max(1, args.limit)))
+        return 0
+
+    if args.command == "tag":
+        if args.tag_command == "add":
+            return _cmd_tag_add(args)
+        if args.tag_command == "remove":
+            return _cmd_tag_remove(args)
+        if args.tag_command == "list":
+            return _cmd_tag_list(args)
+        if args.tag_command == "rename":
+            return _cmd_tag_rename(args)
+        if args.tag_command == "delete":
+            return _cmd_tag_delete(args)
+        parser.error(f"未知 tag 子命令：{args.tag_command}")
 
     if args.command == "stats":
         print(format_stats(args.db))
@@ -837,15 +1111,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "filter":
-        if not args.rules and not args.quality and not args.gps:
+        if not args.rules and not args.quality and not args.tags and not args.gps:
             print(
-                "filter: 请至少指定 --rules / --quality / --gps"
-                "（可用规则见 classify，可用标记见 quality）"
+                "filter: 请至少指定 --rules / --quality / --tags / --gps"
+                "（可用规则见 classify，标记见 quality，标签见 tags）"
             )
             return 2
         engine = RuleEngine()
         rule_ids = _parse_rule_ids(args.rules, engine) if args.rules else None
         quality_ids = _parse_quality_ids(args.quality) if args.quality else None
+        selected_tags = _resolve_tags(args.db, args.tags) if args.tags else []
+        tag_ids = [tag.id for tag in selected_tags] or None
         matched = run_filter(
             args.db,
             rule_ids,
@@ -853,12 +1129,14 @@ def main(argv: list[str] | None = None) -> int:
             gps_only=args.gps,
             limit=args.limit,
             quality_ids=quality_ids,
+            tag_ids=tag_ids,
             strict=args.strict,
         )
         if not matched:
             print("（没有匹配的照片）")
             return 1
-        for info, matches, quality_flags in matched:
+        selected_tag_ids = {tag.id for tag in selected_tags}
+        for info, matches, quality_flags, user_tags in matched:
             if args.explain:
                 parts = [
                     f"{match.label}：{match.reason}"
@@ -869,6 +1147,11 @@ def main(argv: list[str] | None = None) -> int:
                     f"{flag.label}：{flag.reason}"
                     for flag in quality_flags
                     if quality_ids is None or flag.flag_id in quality_ids
+                )
+                parts.extend(
+                    f"★{tag.name}"
+                    for tag in user_tags
+                    if not selected_tag_ids or tag.id in selected_tag_ids
                 )
                 reasons = "；".join(parts) or "（仅按 GPS 筛选）"
                 print(f"{info.file_name}  [{info.category.upper()}]  {reasons}")
