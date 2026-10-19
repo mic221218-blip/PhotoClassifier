@@ -451,3 +451,53 @@ def test_reveal_failure_copies_path_and_warns(root, db_path: Path, monkeypatch) 
     assert warnings and "系统拒绝" in warnings[0][1]
     app.db.close()
     app.quality_store.close()
+
+
+# --------------------------------------------------------------------------- #
+# 打开图片（双击 / 详情按钮）
+# --------------------------------------------------------------------------- #
+
+
+def test_open_button_enabled_and_opens_image(
+    root, db_path: Path, tmp_path: Path, monkeypatch
+) -> None:
+    target = tmp_path / "a.NEF"
+    target.write_bytes(b"x")
+    app = PhotoClassifierApp(root, db_path)
+    info = make_info(target)
+    app.current = info
+    app.set_detail(info)
+    assert app.btn_open.cget("state") == "normal"
+
+    calls = []
+    monkeypatch.setattr(
+        gui, "open_with_default_app", lambda path: (calls.append(path), (True, None))[1]
+    )
+    app.open_selected()
+
+    assert calls == [info.path]
+    assert "已打开" in app.status_left.cget("text")
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_double_click_opens_image_not_folder(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    binding = str(app.result_tree.bind("<Double-1>"))
+    assert "_on_result_double_click" in binding
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_open_failure_warns(root, db_path: Path, monkeypatch) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    app.current = make_info(Path("D:/Photos/2026/a.NEF"))
+    warnings = []
+    monkeypatch.setattr(gui, "open_with_default_app", lambda path: (False, "无法打开文件"))
+    monkeypatch.setattr(
+        gui.messagebox, "showwarning", lambda *args, **kwargs: warnings.append(args)
+    )
+    app.open_selected()
+    assert warnings
+    app.db.close()
+    app.quality_store.close()

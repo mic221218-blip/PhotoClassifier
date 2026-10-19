@@ -44,7 +44,7 @@ from src.quality_scan import AnalyzeOptions, analyze_photos, rebuild_duplicates
 from src.quality_store import QualityStore
 from src.rules import RULE_REGISTRY, RuleEngine, RuleMatch
 from src.scanner import scan_folder
-from src.shell import open_in_explorer
+from src.shell import open_in_explorer, open_with_default_app
 
 #: 项目根目录（src/ 的上一级）。数据库默认位置与其解耦于当前工作目录。
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -496,7 +496,7 @@ class PhotoClassifierApp:
         self.result_tree.tag_configure("error", foreground=ORANGE)
         self.result_tree.tag_configure("dim", foreground=TEXT_SUB)
         self.result_tree.bind("<<TreeviewSelect>>", self._on_result_select)
-        self.result_tree.bind("<Double-1>", lambda _e: self.reveal_selected())
+        self.result_tree.bind("<Double-1>", self._on_result_double_click)
 
     # ------------------------------------------------------------------ #
     # 右侧：详情面板
@@ -514,8 +514,10 @@ class PhotoClassifierApp:
         tk.Frame(actions_area, bg=BORDER_SOFT, height=1).pack(fill="x", padx=18, pady=(0, 10))
         actions = tk.Frame(actions_area, bg=PANEL_BG)
         actions.pack(fill="x", padx=18)
+        self.btn_open = self._button(actions, "打开图片", self.open_selected, primary=True)
+        self.btn_open.pack(side="left", padx=(0, 4), ipady=2)
         self.btn_reveal = self._button(actions, "打开文件位置", self.reveal_selected)
-        self.btn_reveal.pack(side="left", padx=(0, 8), ipady=2)
+        self.btn_reveal.pack(side="left", padx=(0, 4), ipady=2)
         self.btn_copy = self._button(actions, "复制路径", self.copy_selected_path)
         self.btn_copy.pack(side="left", ipady=2)
         actions2 = tk.Frame(actions_area, bg=PANEL_BG)
@@ -619,6 +621,7 @@ class PhotoClassifierApp:
             tk.Label(
                 self.quality_frame, text="—", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
             ).pack(anchor="w")
+            self.btn_open.config(state="disabled", command=None)
             self.btn_reveal.config(state="disabled", command=None)
             self.btn_copy.config(state="disabled", command=None)
             return
@@ -653,8 +656,13 @@ class PhotoClassifierApp:
             ).pack(side="right")
 
         path = info.path
+        exists = path.exists()
+        self.btn_open.config(
+            state="normal" if exists else "disabled",
+            command=self.open_selected,
+        )
         self.btn_reveal.config(
-            state="normal" if path.exists() else "disabled",
+            state="normal" if exists else "disabled",
             command=self.reveal_selected,
         )
         self.btn_copy.config(state="normal", command=self.copy_selected_path)
@@ -991,6 +999,10 @@ class PhotoClassifierApp:
     def _select_target() -> PhotoInfo | None:
         return None
 
+    def _on_result_double_click(self, _event=None) -> None:
+        """双击结果行：用默认程序打开图片（不是打开所在文件夹）。"""
+        self.open_selected()
+
     def _on_result_select(self, _event=None) -> None:
         selection = self.result_tree.selection()
         if not selection:
@@ -998,6 +1010,16 @@ class PhotoClassifierApp:
         info = self.infos_by_iid.get(selection[0])
         if info is not None:
             self.set_detail(info)
+
+    def open_selected(self) -> None:
+        """用系统默认程序打开当前照片（双击结果行也会走这里）。"""
+        if self.current is None:
+            return
+        ok, error = open_with_default_app(self.current.path)
+        if ok:
+            self.status_left.config(text=f"已打开：{self.current.file_name}")
+        else:
+            messagebox.showwarning("打开图片", error)
 
     def reveal_selected(self) -> None:
         if self.current is None:

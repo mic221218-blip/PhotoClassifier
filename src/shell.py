@@ -1,10 +1,8 @@
-"""Windows 资源管理器集成（V2.5+ 修复版）。
+"""Windows 资源管理器 / 默认程序集成。
 
-“打开文件位置”不再启动新的 ``explorer.exe`` 进程：
-
-- 沙箱 / 受限令牌下启动 explorer.exe 会弹出 0xc0000142 应用错误；
-- 正确做法是调用 Shell API ``SHOpenFolderAndSelectItems``，
-  让**已经在运行的**资源管理器定位文件。
+- “打开图片”：用系统默认程序打开文件（NEF/JPEG 通常是“照片”应用）；
+- “打开文件位置”：不启动新的 ``explorer.exe`` 进程，而是调用 Shell API
+  ``SHOpenFolderAndSelectItems``，让**已经在运行的**资源管理器定位文件。
 
 失败时退回到“打开所在文件夹”，再失败就把路径交给调用方
 （GUI 会复制到剪贴板并提示）。
@@ -16,6 +14,78 @@ import ctypes
 import os
 from ctypes import wintypes
 from pathlib import Path
+from urllib.parse import quote
+
+#: Windows“照片”应用支持的 URI 激活（没有默认关联时兜底）
+_PHOTOS_URI = "ms-photos:viewer?fileName={encoded}"
+
+#: 图片扩展名（统一用 Windows“照片”打开，避免被第三方看图工具接管）
+_IMAGE_SUFFIXES = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".bmp",
+    ".gif",
+    ".webp",
+    ".heic",
+    ".heif",
+}
+
+#: 常见 RAW 扩展名（Windows“照片”可借助 RAW 扩展打开预览）
+_RAW_SUFFIXES = {
+    ".nef",
+    ".nrw",
+    ".cr2",
+    ".cr3",
+    ".arw",
+    ".srf",
+    ".sr2",
+    ".raf",
+    ".dng",
+    ".orf",
+    ".rw2",
+    ".pef",
+    ".srw",
+}
+
+
+def open_with_default_app(path: str | Path) -> tuple[bool, str | None]:
+    """用系统默认程序打开文件。
+
+    - 有默认关联（JPG/PNG 等）：直接交给默认应用；
+    - NEF 等 RAW 没有关联时：用 ``ms-photos:`` URI 让“照片”应用打开；
+    - 其他情况：尝试系统“打开方式”。
+
+    返回 ``(成功, 错误信息)``；不抛异常。
+    """
+    target = Path(path)
+    try:
+        if not target.exists():
+            return False, f"文件不存在：{target}"
+    except OSError as exc:
+        return False, f"无法访问文件：{exc}"
+
+    if not hasattr(os, "startfile"):
+        return False, "当前系统不支持用默认程序打开文件"
+
+    suffix = target.suffix.lower()
+    if suffix in _IMAGE_SUFFIXES | _RAW_SUFFIXES:
+        # 图片统一用 Windows“照片”打开（这台机器上 .NEF/.PNG 的默认关联是
+        # 第三方看图工具，用户要的是“照片”这样的查看体验）
+        uri = _PHOTOS_URI.format(encoded=quote(str(target), safe=""))
+        try:
+            os.startfile(uri)  # type: ignore[attr-defined]
+            return True, None
+        except OSError:
+            pass  # 没有“照片”应用时退回默认关联
+
+    try:
+        os.startfile(str(target))  # type: ignore[attr-defined]
+        return True, None
+    except OSError as exc:
+        return False, f"无法打开文件：{exc}"
 
 
 def open_in_explorer(path: str | Path) -> tuple[bool, str | None]:

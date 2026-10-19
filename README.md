@@ -139,7 +139,9 @@ requires re-decoding an image.
   counts, cancellable at any time;
 - **Results list**: file name, type, capture time, camera, ISO, shutter, size;
 - **Detail panel**: full photo information (same fields as the database) +
-  `Reveal in Explorer` and `Copy Path`;
+  `Open Photo` (Windows Photos), `Reveal in Explorer` and `Copy Path`;
+- **Double-click a result row** to open the photo in Windows Photos (it no
+  longer just reveals the containing folder);
 - **Quality analysis**: the "Quality analysis (V2.5)" checkboxes (blur / motion
   blur / overexposed / underexposed / black frame / duplicate) share the same
   AND/OR logic as auto tags; a "Quality" column, and a "Quality analysis" block
