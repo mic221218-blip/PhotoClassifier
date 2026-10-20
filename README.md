@@ -144,8 +144,9 @@ presented and filtered through the same layer.
   chips, an input field and autocomplete; × removes a tag; new names are created
   after confirmation;
 - **Batch**: multi-select rows + context menu (Open Photo / Reveal in Explorer /
-  Add tag… / Remove tag… / Copy Path), count confirmation, and **Ctrl+Z**
-  single-step undo;
+  Add tag… / Remove tag… / Copy Path / **Remove from library…**), count
+  confirmation, and **Ctrl+Z** single-step undo; the Delete key removes selected
+  records too (database only, files are never deleted);
 - **Filtering**: "My tags" in the left panel with search, checkboxes and photo
   counts; it shares the same AND/OR as rules and quality (single implementation
   in `src/filtering.py`);
@@ -241,6 +242,7 @@ python -m src.main tag add --tag Architecture --match jinjihu
 python -m src.main tag list --tag Architecture
 python -m src.main filter --tags Architecture
 python -m src.main filter --rules night --tags Architecture
+python -m src.main filter --quality-ok
 python -m src.main tag rename "To retouch" "To refine"
 python -m src.main tag delete "To refine" --yes
 ```
@@ -327,7 +329,7 @@ path to the clipboard so you can paste it into Explorer's address bar.
 python -m pytest
 ```
 
-The suite contains **310 tests**. Scanning, EXIF, rules, database and CLI tests
+The suite contains **317 tests**. Scanning, EXIF, rules, database and CLI tests
 use temporary files synthesized to the TIFF / EXIF / PNG specifications
 (`tests/exif_maker.py`); quality tests draw small images with Pillow
 (`tests/image_maker.py`) and cover NEF embedded previews, blur/exposure,
@@ -469,7 +471,9 @@ The entire project must obey:
 - Never modify RAW files by default;
 - Never move originals by default;
 - Any operation that moves or copies files (V5 export) requires explicit user
-  confirmation.
+  confirmation;
+- "Remove from library" deletes database records only (photo, quality and tag
+  links); **files on disk are never deleted**, and a rescan brings them back.
 
 ---
 
