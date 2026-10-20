@@ -155,7 +155,11 @@ class PanelsMixin:
             panel, text="质量分析（V2.5）", bg=PANEL_BG, fg=TEXT, font=self._font(10, bold=True)
         ).pack(anchor="w", padx=16)
         tk.Label(
-            panel, text="模糊 / 曝光 / 重复 · 勾选后实时筛选", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
+            panel,
+            text="勾选问题以查看坏片，或直接看“质量正常”",
+            bg=PANEL_BG,
+            fg=TEXT_FAINT,
+            font=self._font(8),
         ).pack(anchor="w", padx=16, pady=(0, 4))
 
         quality = tk.Frame(panel, bg=PANEL_BG)
@@ -167,7 +171,7 @@ class PanelsMixin:
                 quality,
                 text=FLAG_LABELS[flag_id],
                 variable=var,
-                command=self._on_filter_changed,
+                command=self._on_quality_flag_changed,
                 bg=PANEL_BG,
                 fg=TEXT,
                 activebackground=PANEL_BG,
@@ -175,6 +179,19 @@ class PanelsMixin:
                 selectcolor=INPUT_BG,
                 font=self._font(9),
             ).grid(row=i // 2, column=i % 2, sticky="w", pady=1, padx=(0, 6))
+
+        tk.Checkbutton(
+            panel,
+            text="只看质量正常（不含重复）",
+            variable=self.quality_ok_var,
+            command=self._on_quality_ok_changed,
+            bg=PANEL_BG,
+            fg=GREEN,
+            activebackground=PANEL_BG,
+            activeforeground=GREEN,
+            selectcolor=INPUT_BG,
+            font=self._font(9, bold=True),
+        ).pack(anchor="w", padx=16, pady=(4, 0))
 
         tk.Frame(panel, bg=BORDER_SOFT, height=1).pack(fill="x", padx=12, pady=(8, 6))
         tk.Label(
@@ -303,6 +320,7 @@ class PanelsMixin:
         self.result_tree.bind("<<TreeviewSelect>>", self._on_result_select)
         self.result_tree.bind("<Double-1>", self._on_result_double_click)
         self.result_tree.bind("<Button-3>", self._show_result_menu)
+        self.result_tree.bind("<Delete>", self._on_delete_key)
 
     # ------------------------------------------------------------------ #
     # 右侧：详情面板

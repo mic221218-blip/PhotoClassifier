@@ -106,3 +106,53 @@ def test_with_values_and_count() -> None:
     assert updated.and_mode is False
     assert updated.selected_count == 3
     assert not updated.is_empty
+
+
+def test_quality_ok_rejects_technical_flags() -> None:
+    selection = FilterSelection(quality_ok=True)
+    assert not selection.is_empty
+    assert matches(
+        make_info(), rule_hits=set(), quality_hits=set(), tag_hits=set(), selection=selection
+    )
+    assert not matches(
+        make_info(),
+        rule_hits=set(),
+        quality_hits={"blurry"},
+        tag_hits=set(),
+        selection=selection,
+    )
+    assert not matches(
+        make_info(),
+        rule_hits=set(),
+        quality_hits={"__unanalyzed__"},
+        tag_hits=set(),
+        selection=selection,
+    )
+
+
+def test_quality_ok_ignores_duplicate_flag() -> None:
+    selection = FilterSelection(quality_ok=True)
+    assert matches(
+        make_info(),
+        rule_hits=set(),
+        quality_hits={"duplicate"},
+        tag_hits=set(),
+        selection=selection,
+    )
+
+
+def test_quality_ok_combines_with_rules_and_tags() -> None:
+    selection = FilterSelection(rule_ids=frozenset({"night"}), tag_ids=frozenset({1}), quality_ok=True)
+    assert matches(
+        make_info(), rule_hits={"night"}, quality_hits=set(), tag_hits={1}, selection=selection
+    )
+    assert not matches(
+        make_info(), rule_hits={"night"}, quality_hits={"overexposed"}, tag_hits={1}, selection=selection
+    )
+
+
+def test_quality_ok_with_values_and_count() -> None:
+    selection = FilterSelection().with_values(quality_ok=True)
+    assert selection.quality_ok
+    assert selection.selected_count == 1
+    assert not selection.is_empty

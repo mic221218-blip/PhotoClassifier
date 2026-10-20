@@ -325,7 +325,7 @@ def test_quality_column_and_detail(root, db_path: Path) -> None:
         for iid in app.result_tree.get_children()
     }
     assert "模糊" in row_values["a.NEF"][7]
-    assert row_values["b.NEF"][7] == ""
+    assert row_values["b.NEF"][7] == "正常"
     assert "过曝" in row_values["c.NEF"][7]
 
     iid = str(Path("D:/Photos/2026/a.NEF").resolve())
@@ -658,5 +658,50 @@ def test_tag_search_filters_list(root, db_path: Path) -> None:
     assert len(app.tag_tree.get_children()) == 10
 
     app.tag_store.close()
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_quality_ok_filter_shows_only_normal(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+    seed_quality_rows(app)
+
+    app.quality_ok_var.set(True)
+    app._on_quality_ok_changed()
+    assert row_names(app) == {"b.NEF"}
+
+    row_values = {
+        app.result_tree.item(iid, "values")[0]: app.result_tree.item(iid, "values")
+        for iid in app.result_tree.get_children()
+    }
+    assert row_values["b.NEF"][7] == "正常"
+
+    # 勾具体问题会自动取消“正常”，回到问题筛选
+    app.quality_vars["blurry"].set(True)
+    app._on_quality_flag_changed()
+    assert app.quality_ok_var.get() is False
+    assert row_names(app) == {"a.NEF"}
+
+    app.clear_filters()
+    assert row_names(app) == {"a.NEF", "b.NEF", "c.NEF"}
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_remove_selected_photos_removes_db_record_only(root, db_path: Path, monkeypatch) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+    assert app.db.count_photos() == 3
+
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    iid = str(Path("D:/Photos/2026/b.NEF").resolve())
+    app.result_tree.selection_set(iid)
+    app.remove_selected_photos()
+
+    assert app.db.count_photos() == 2
+    assert app.db.get_photo("D:/Photos/2026/b.NEF") is None
+    assert row_names(app) == {"a.NEF", "c.NEF"}
+    assert app.current is None
     app.db.close()
     app.quality_store.close()

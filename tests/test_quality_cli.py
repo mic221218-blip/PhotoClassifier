@@ -9,7 +9,9 @@ from PIL import Image
 
 pytest.importorskip("PIL.Image")
 
+from src.database import PhotoDatabase  # noqa: E402
 from src.main import main  # noqa: E402
+from src.quality import ANALYZER_VERSION, QualityMeasurement  # noqa: E402
 from src.quality_store import QualityStore  # noqa: E402
 
 from image_maker import (  # noqa: E402

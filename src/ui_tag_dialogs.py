@@ -114,6 +114,12 @@ class TagDialogsMixin:
         menu.add_command(label=f"移除标签…（{count} 张）", command=self.batch_remove_tags)
         menu.add_separator()
         menu.add_command(label="复制路径", command=self.copy_selected_path)
+        menu.add_separator()
+        menu.add_command(
+            label=f"从照片库移除…（{count} 张）",
+            command=self.remove_selected_photos,
+            foreground="#ff8a8a",
+        )
         menu.tk_popup(event.x_root, event.y_root)
 
     def batch_add_tags(self) -> None:

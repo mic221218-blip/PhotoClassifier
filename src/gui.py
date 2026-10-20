@@ -110,6 +110,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
         self.active_tags: set[int] = set()
         self.and_mode = tk.BooleanVar(value=True)
         self.gps_only = tk.BooleanVar(value=False)
+        self.quality_ok_var = tk.BooleanVar(value=False)
         self.rule_vars: dict[str, tk.BooleanVar] = {}
         self.quality_vars: dict[str, tk.BooleanVar] = {}
         self.measurements_by_path: dict[str, QualityMeasurement] = {}
@@ -230,6 +231,41 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
             for iid in self.result_tree.selection()
             if iid in self.infos_by_iid
         ]
+
+    def _on_delete_key(self, _event=None) -> str:
+        self.remove_selected_photos()
+        return "break"
+
+    def remove_selected_photos(self) -> None:
+        """从照片库移除选中记录；只删数据库，不删除磁盘文件。"""
+        infos = self._selected_infos()
+        if not infos:
+            return
+        count = len(infos)
+        preview = "\n".join(info.file_name for info in infos[:6])
+        if count > 6:
+            preview += f"\n……另外 {count - 6} 张"
+        if not messagebox.askyesno(
+            "从照片库移除",
+            f"将从 PhotoClassifier 移除 {count} 张照片：\n\n{preview}\n\n"
+            "只删除数据库记录，不会删除磁盘文件；重新扫描该文件夹会再次加入。\n\n继续？",
+        ):
+            return
+        removed_paths = {str(info.path) for info in infos}
+        removed = self.db.remove_photos([info.path for info in infos])
+        if removed <= 0:
+            self.status_left.config(text="没有可移除的照片记录")
+            return
+        if self.current is not None and str(self.current.path) in removed_paths:
+            self.current = None
+            self.set_detail(None)
+        self._quality_revision += 1
+        self.tag_controller.mark_dirty()
+        self.refresh_library()
+        self.refresh_tags()
+        self.refresh_results()
+        self.refresh_status_bar()
+        self.status_left.config(text=f"已从照片库移除 {removed} 张（磁盘文件保留）")
 
     def undo_last_tag_operation(self) -> None:
         message = self.tag_controller.undo_last()
@@ -362,8 +398,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
             )
             if not quality_text:
                 measurement = self.measurements_by_path.get(str(info.path))
-                if measurement is not None and measurement.error:
+                if measurement is None:
+                    quality_text = ""
+                elif measurement.error:
                     quality_text = "失败"
+                else:
+                    quality_text = "正常"
             values = (
                 info.file_name,
                 category_label(info.category),
@@ -385,7 +425,13 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
 
         total = self.db.count_photos()
         filter_note = ""
-        if self.active_rules or self.active_quality or self.active_tags or self.gps_only.get():
+        if (
+            self.active_rules
+            or self.active_quality
+            or self.active_tags
+            or self.gps_only.get()
+            or self.quality_ok_var.get()
+        ):
             filter_note = " · 已筛选"
         self.count_label.config(
             text=f"库中共 {total:,} 个文件 · 当前显示 {visible:,} 张{filter_note}"
@@ -453,16 +499,34 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
             tag_ids=frozenset(self.active_tags),
             and_mode=self.and_mode.get(),
             gps_only=self.gps_only.get(),
+            quality_ok=self.quality_ok_var.get(),
         )
         if selection.is_empty:
             return True
+        quality_hits = {flag.flag_id for flag in quality_flags}
+        measurement = self.measurements_by_path.get(str(info.path))
+        if measurement is None or measurement.error:
+            quality_hits.add("__unanalyzed__")
         return selection_matches(
             info,
             rule_hits={match.rule_id for match in matches},
-            quality_hits={flag.flag_id for flag in quality_flags},
+            quality_hits=quality_hits,
             tag_hits={tag.id for tag in (user_tags or [])},
             selection=selection,
         )
+
+    def _on_quality_flag_changed(self) -> None:
+        """勾选具体问题标记时，自动取消“只看质量正常”。"""
+        if any(var.get() for var in self.quality_vars.values()):
+            self.quality_ok_var.set(False)
+        self._on_filter_changed()
+
+    def _on_quality_ok_changed(self) -> None:
+        """勾选“质量正常”时清掉具体问题标记，避免语义冲突。"""
+        if self.quality_ok_var.get():
+            for var in self.quality_vars.values():
+                var.set(False)
+        self._on_filter_changed()
 
     def _on_filter_changed(self) -> None:
         self.active_rules = {
@@ -483,6 +547,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
         for var in self.quality_vars.values():
             var.set(False)
         self.gps_only.set(False)
+        self.quality_ok_var.set(False)
         self.active_rules = set()
         self.active_quality = set()
         self.active_tags = set()

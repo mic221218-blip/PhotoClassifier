@@ -11,6 +11,9 @@ import pytest
 
 from src.database import PhotoDatabase
 from src.photo_info import EXIF_ERROR, EXIF_NO_EXIF, EXIF_OK, EXIF_SKIPPED, PhotoInfo
+from src.quality import ANALYZER_VERSION, QualityMeasurement
+from src.quality_store import QualityStore
+from src.tag_store import TagStore
 from src.scanner import CATEGORY_JPEG, CATEGORY_NEF, CATEGORY_VIDEO
 
 
@@ -366,3 +369,73 @@ def test_remove_folder_keeps_photo_records(db_path: Path) -> None:
 
         assert db.list_folders() == []
         assert db.count_photos() == 1  # 只移除库条目，不动照片记录
+
+
+def test_remove_photos_cascades_and_keeps_file(tmp_path: Path) -> None:
+    db_path = tmp_path / "photos.db"
+    keep = tmp_path / "keep.JPG"
+    drop = tmp_path / "drop.JPG"
+    keep.write_bytes(b"keep")
+    drop.write_bytes(b"drop")
+
+    with PhotoDatabase.open(db_path) as database:
+        database.upsert_many([make_info(keep), make_info(drop)])
+    with TagStore.open(db_path) as tags:
+        tag = tags.ensure_tag("建筑")
+        tags.add_tags([keep, drop], [tag.id])
+    with QualityStore.open(db_path) as quality:
+        quality.upsert_many(
+            [
+                QualityMeasurement(
+                    path=str(keep.resolve()),
+                    analyzer_version=ANALYZER_VERSION,
+                    analyzed_at="2026-10-21 00:00:00",
+                    preview_source="full_image",
+                    preview_width=640,
+                    preview_height=480,
+                    blur_score=500.0,
+                    contrast=50.0,
+                    anisotropy=0.1,
+                    mean_lum=110.0,
+                    std_lum=45.0,
+                    clip_low_frac=0.0,
+                    clip_high_frac=0.0,
+                    dhash="0" * 16,
+                    quick_hash="quick",
+                    file_size=4,
+                    file_mtime="2026-10-21 00:00:00",
+                ),
+                QualityMeasurement(
+                    path=str(drop.resolve()),
+                    analyzer_version=ANALYZER_VERSION,
+                    analyzed_at="2026-10-21 00:00:00",
+                    preview_source="full_image",
+                    preview_width=640,
+                    preview_height=480,
+                    blur_score=500.0,
+                    contrast=50.0,
+                    anisotropy=0.1,
+                    mean_lum=110.0,
+                    std_lum=45.0,
+                    clip_low_frac=0.0,
+                    clip_high_frac=0.0,
+                    dhash="1" * 16,
+                    quick_hash="quick2",
+                    file_size=4,
+                    file_mtime="2026-10-21 00:00:00",
+                ),
+            ]
+        )
+
+    with PhotoDatabase.open(db_path) as database:
+        assert database.remove_photos([drop]) == 1
+        assert database.get_photo(drop) is None
+        assert database.count_photos() == 1
+    with TagStore.open(db_path) as tags:
+        assert tags.counts()[tag.id] == 1
+    with QualityStore.open(db_path) as quality:
+        assert quality.count() == 1
+
+    assert drop.read_bytes() == b"drop"  # 原文件仍在
+    assert keep.read_bytes() == b"keep"
+    assert db_path.exists()

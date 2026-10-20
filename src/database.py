@@ -398,6 +398,25 @@ class PhotoDatabase:
         with self._conn:
             self._conn.execute("DELETE FROM folders WHERE path = ?", (key,))
 
+    def remove_photos(self, paths: Iterable[str | Path]) -> int:
+        """从照片库移除若干照片记录（级联清理质量与标签；**不碰磁盘文件**）。
+
+        返回实际移除的照片记录数。重新扫描同一文件夹会再次加入。
+        """
+        keys = list(dict.fromkeys(resolve_key(path) for path in paths))
+        if not keys:
+            return 0
+        removed = 0
+        with self._conn:
+            for start in range(0, len(keys), 500):
+                chunk = keys[start : start + 500]
+                marks = ", ".join("?" for _ in chunk)
+                self._conn.execute(f"DELETE FROM photo_tags WHERE path IN ({marks})", chunk)
+                self._conn.execute(f"DELETE FROM photo_quality WHERE path IN ({marks})", chunk)
+                cursor = self._conn.execute(f"DELETE FROM photos WHERE path IN ({marks})", chunk)
+                removed += int(cursor.rowcount or 0)
+        return removed
+
     def mark_folder_scanned(self, path: str | Path) -> None:
         """确保文件夹在库中，并更新其最近扫描时间。"""
         key = resolve_key(path)

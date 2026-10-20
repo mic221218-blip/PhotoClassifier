@@ -607,6 +607,7 @@ def run_filter(
     quality_ids: list[str] | None = None,
     tag_ids: list[int] | None = None,
     strict: bool = False,
+    quality_ok: bool = False,
 ) -> list[tuple[PhotoInfo, list[RuleMatch], list[QualityFlag], list[Tag]]]:
     """按规则 / 质量 / 用户标签筛选照片。
 
@@ -623,6 +624,7 @@ def run_filter(
         tag_ids=frozenset(tag_ids or ()),
         and_mode=use_and,
         gps_only=gps_only,
+        quality_ok=quality_ok,
     )
     if selection.is_empty:
         # 调用方应提前报错；这里防御性返回空
@@ -650,6 +652,8 @@ def run_filter(
         if reason:
             quality_flags.append(QualityFlag("duplicate", FLAG_LABELS["duplicate"], reason))
         quality_hits = {flag.flag_id for flag in quality_flags}
+        if measurement is None or measurement.error:
+            quality_hits.add("__unanalyzed__")
 
         user_tags = tags_by_path.get(str(info.path), [])
         tag_hits = {tag.id for tag in user_tags}
@@ -813,11 +817,14 @@ def _cmd_dupes(args) -> int:
 
 
 def _cmd_filter(args) -> int:
-    if not args.rules and not args.quality and not args.tags and not args.gps:
+    if not args.rules and not args.quality and not args.tags and not args.gps and not args.quality_ok:
         print(
-            "filter: 请至少指定 --rules / --quality / --tags / --gps"
+            "filter: 请至少指定 --rules / --quality / --quality-ok / --tags / --gps"
             "（可用规则见 classify，标记见 quality，标签见 tags）"
         )
+        return 2
+    if args.quality_ok and args.quality:
+        print("filter: --quality-ok 与 --quality 不能同时使用（一个看正常，一个看问题）")
         return 2
     engine = RuleEngine()
     rule_ids = _parse_rule_ids(args.rules, engine) if args.rules else None
@@ -833,6 +840,7 @@ def _cmd_filter(args) -> int:
         quality_ids=quality_ids,
         tag_ids=tag_ids,
         strict=args.strict,
+        quality_ok=args.quality_ok,
     )
     if not matched:
         print("（没有匹配的照片）")
@@ -850,6 +858,8 @@ def _cmd_filter(args) -> int:
                 for flag in quality_flags
                 if quality_ids is None or flag.flag_id in quality_ids
             )
+            if args.quality_ok:
+                parts.append("质量正常")
             parts.extend(
                 f"★{tag.name}"
                 for tag in user_tags
@@ -898,6 +908,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--quality",
         default="",
         help="逗号分隔的质量标记，如 blurry,duplicate（见 quality）",
+    )
+    filter_parser.add_argument(
+        "--quality-ok",
+        action="store_true",
+        help="只看质量正常的照片（无模糊/运动/曝光问题；重复不在此列）",
     )
     filter_parser.add_argument(
         "--tags",
