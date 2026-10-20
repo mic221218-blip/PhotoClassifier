@@ -650,24 +650,29 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
                 btn.config(state="normal")
 
     def _scan_worker(self, folders) -> None:  # 在后台线程中运行
-        for index, folder in enumerate(folders, start=1):
-            if self.cancel_event.is_set():
-                break
-            self.msg_queue.put(("folder", index, len(folders), folder))
-            result = scan_folder(folder)
-            infos: list[PhotoInfo] = []
-            n = len(result.files)
-            for done, item in enumerate(result.files, start=1):
-                if self.cancel_event.is_set():
-                    break
-                infos.append(read_photo_info(item.path, item.category))
-                if done % 5 == 0 or done == n:
-                    self.msg_queue.put(("progress", done, n, item.path.name))
-            if infos:
-                self.db.upsert_many(infos)
-            if not self.cancel_event.is_set():
-                self.db.mark_folder_scanned(folder)
-        self.msg_queue.put(("done",))
+        # SQLite 连接不能跨线程使用：工作线程必须自己开一个连接。
+        try:
+            with PhotoDatabase.open(self.db_path) as database:
+                for index, folder in enumerate(folders, start=1):
+                    if self.cancel_event.is_set():
+                        break
+                    self.msg_queue.put(("folder", index, len(folders), folder))
+                    result = scan_folder(folder)
+                    infos: list[PhotoInfo] = []
+                    n = len(result.files)
+                    for done, item in enumerate(result.files, start=1):
+                        if self.cancel_event.is_set():
+                            break
+                        infos.append(read_photo_info(item.path, item.category))
+                        if done % 5 == 0 or done == n:
+                            self.msg_queue.put(("progress", done, n, item.path.name))
+                    if infos:
+                        database.upsert_many(infos)
+                    if not self.cancel_event.is_set():
+                        database.mark_folder_scanned(folder)
+            self.msg_queue.put(("done",))
+        except Exception as exc:  # 任何异常都必须回到 UI，避免进度条永远停在“扫描中”
+            self.msg_queue.put(("error", str(exc)))
 
     def _poll_scan_queue(self) -> None:
         try:
@@ -686,6 +691,14 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
                     self.progress_bar.config(value=percent)
                     self.progress_detail.config(text=f"{done:,} / {n:,} · {percent:.0f}%")
                     self.progress_current.config(text=f"当前文件：{name}")
+                elif kind == "error":
+                    self._set_scanning_ui(False)
+                    self._quality_revision += 1
+                    self.refresh_library()
+                    self.refresh_results()
+                    self.refresh_status_bar()
+                    messagebox.showerror("扫描失败", msg[1])
+                    break
                 elif kind == "done":
                     cancelled = self.cancel_event.is_set()
                     self._set_scanning_ui(False)

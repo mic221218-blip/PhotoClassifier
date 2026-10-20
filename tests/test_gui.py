@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import threading
 import tkinter as tk
 from pathlib import Path
 from types import SimpleNamespace
@@ -111,6 +112,34 @@ def test_scan_worker_processes_real_files(root, db_path: Path, tmp_path: Path) -
 
     app.refresh_results()
     assert app.result_tree.get_children()  # 结果列表已刷新
+    app.db.close()
+
+
+def test_scan_worker_runs_in_background_thread(root, db_path: Path, tmp_path: Path) -> None:
+    """回归：后台线程必须自己开 SQLite 连接，不能复用主线程连接。"""
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    (photo_dir / "DSC_0001.NEF").write_bytes(nikon_z6iii_nef())
+
+    app = PhotoClassifierApp(root, db_path)
+    app.db.add_folder(photo_dir)
+    errors = []
+    previous = threading.excepthook
+    threading.excepthook = lambda args: errors.append(repr(args.exc_value))
+    try:
+        worker = threading.Thread(target=app._scan_worker, args=([str(photo_dir)],))
+        worker.start()
+        worker.join(timeout=20)
+    finally:
+        threading.excepthook = previous
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert app.db.count_photos() == 1
+    messages = []
+    while not app.msg_queue.empty():
+        messages.append(app.msg_queue.get())
+    assert messages[-1] == ("done",)
     app.db.close()
 
 
