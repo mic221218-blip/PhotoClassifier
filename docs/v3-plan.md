@@ -522,7 +522,7 @@ Once confirmed, implementation proceeds M1 → M5. No code is written before con
 
 | Item | Result |
 | --- | --- |
-| Tests | **325 green** (76 new since V3) |
+| Tests | **327 green** (78 new since V3) |
 | Real database migration | 1,375 photos, user_version `1 → 2`, 10 presets, original data unchanged |
 | 10,000 photos / 50,000 assignments | cache load + path mapping **114 ms**; rules+tags filter **11 ms**; counts **4 ms** |
 | Batch writes | tag 1,000 photos **21 ms**; 50,000 assignments **22 ms** |
