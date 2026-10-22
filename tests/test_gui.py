@@ -18,6 +18,7 @@ import pytest
 import src.gui as gui
 from src.gui import PhotoClassifierApp
 from src.quality import ANALYZER_VERSION, FLAG_IDS, QualityMeasurement
+from src.tags import PICK_TAG_NAME
 
 from exif_maker import nikon_z6iii_nef
 from test_database import make_info
@@ -786,5 +787,64 @@ def test_sharpness_sort_requires_quality_data(root, db_path: Path) -> None:
     app.btn_sort_quality.invoke()
     assert app.sort_mode == "default"
     assert "还没有清晰度数据" in app.status_left.cget("text")
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_pick_button_marks_and_unmarks(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+    assert str(app.btn_pick.cget("state")) == "disabled"
+
+    iid = str(Path("D:/Photos/2026/a.NEF").resolve())
+    app.result_tree.selection_set(iid)
+    app._on_result_select()
+    assert str(app.btn_pick.cget("state")) == "normal"
+    assert app.btn_pick.cget("text") == "标记精选"
+
+    app.btn_pick.invoke()
+    tag = app.tag_store.get_by_name(PICK_TAG_NAME)
+    assert tag is not None
+    assert app.tag_controller.tag_counts[tag.id] == 1
+    assert "★精选" in app.result_tree.item(iid, "values")[6]
+    assert app.btn_pick.cget("text") == "取消精选"
+
+    app.btn_pick.invoke()
+    assert app.tag_controller.tag_counts.get(tag.id, 0) == 0
+    assert "★精选" not in app.result_tree.item(iid, "values")[6]
+    assert app.btn_pick.cget("text") == "标记精选"
+
+    app.btn_pick.invoke()
+    app.undo_last_tag_operation()
+    assert app.tag_controller.tag_counts.get(tag.id, 0) == 0
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_pick_button_multi_select_adds_missing_and_removes_all(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+    a = str(Path("D:/Photos/2026/a.NEF").resolve())
+    b = str(Path("D:/Photos/2026/b.NEF").resolve())
+    c = str(Path("D:/Photos/2026/c.NEF").resolve())
+
+    app.result_tree.selection_set((a, b))
+    app._on_result_select()
+    app.btn_pick.invoke()
+    tag = app.tag_store.get_by_name(PICK_TAG_NAME)
+    assert app.tag_controller.tag_counts[tag.id] == 2
+
+    # a 已精选、c 未精选：混合选择应该只补 c，而不是取消 a
+    app.result_tree.selection_set((a, c))
+    app._on_result_select()
+    assert app.btn_pick.cget("text") == "标记精选"
+    app.btn_pick.invoke()
+    assert app.tag_controller.tag_counts[tag.id] == 3
+
+    app.result_tree.selection_set((a, b, c))
+    app._on_result_select()
+    assert app.btn_pick.cget("text") == "取消精选"
+    app.btn_pick.invoke()
+    assert app.tag_controller.tag_counts.get(tag.id, 0) == 0
     app.db.close()
     app.quality_store.close()

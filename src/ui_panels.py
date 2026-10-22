@@ -289,6 +289,8 @@ class PanelsMixin:
         self.count_label.pack(side="left", padx=(12, 0))
         self.btn_sort_quality = self._button(header, "清晰度优先", self.toggle_quality_sort)
         self.btn_sort_quality.pack(side="right")
+        self.btn_pick = self._button(header, "标记精选", self.toggle_picked, disabled=True)
+        self.btn_pick.pack(side="right", padx=(0, 6))
 
         # 扫描进度视图（扫描时显示，平时隐藏）
         self.progress_frame = tk.Frame(center, bg=WIN_BG)
@@ -323,6 +325,8 @@ class PanelsMixin:
         self.result_tree.bind("<Double-1>", self._on_result_double_click)
         self.result_tree.bind("<Button-3>", self._show_result_menu)
         self.result_tree.bind("<Delete>", self._on_delete_key)
+        self.result_tree.bind("<p>", self._on_pick_key)
+        self.result_tree.bind("<P>", self._on_pick_key)
 
     # ------------------------------------------------------------------ #
     # 右侧：详情面板

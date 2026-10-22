@@ -116,6 +116,11 @@ class TagDialogsMixin:
         menu.add_command(label="复制路径", command=self.copy_selected_path)
         menu.add_separator()
         menu.add_command(
+            label="取消精选" if self._selected_all_picked() else "标记精选",
+            command=self.toggle_picked,
+        )
+        menu.add_separator()
+        menu.add_command(
             label=f"从照片库移除…（{count} 张）",
             command=self.remove_selected_photos,
             foreground="#ff8a8a",

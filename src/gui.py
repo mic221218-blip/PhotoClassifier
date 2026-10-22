@@ -50,7 +50,13 @@ from src.tag_store import Tag, TagStore
 from src.ui_detail import DetailMixin
 from src.ui_panels import PanelsMixin
 from src.ui_tag_dialogs import TagDialogsMixin
-from src.tags import TagConflict, TagError, chip_colors, normalize_tag_name
+from src.tags import (
+    PICK_TAG_NAME,
+    TagConflict,
+    TagError,
+    chip_colors,
+    normalize_tag_name,
+)
 from src.scanner import scan_folder
 from src.shell import open_in_explorer, open_with_default_app
 
@@ -206,7 +212,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
         btn = tk.Button(
             parent,
             text=text,
-            command=command if not disabled else None,
+            command=command,
             font=self._font(10, bold=primary),
             bg=ACCENT if primary and not disabled else INPUT_BG,
             fg="#ffffff" if primary and not disabled else (TEXT_FAINT if disabled else TEXT),
@@ -449,10 +455,67 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
             text=f"库中共 {total:,} 个文件 · 当前显示 {visible:,} 张{filter_note}{sort_note}"
         )
         self._update_sort_button()
+        self._update_pick_button()
         if self.current is not None:
             keep = self.infos_by_iid.get(str(self.current.path))
             if keep is not None and str(keep.path) in self.matches_by_iid:
                 self.set_detail(keep)
+
+    def _selected_all_picked(self, infos: list[PhotoInfo] | None = None) -> bool:
+        infos = infos if infos is not None else self._selected_infos()
+        if not infos:
+            return False
+        tag = self.tag_controller.get_by_name(PICK_TAG_NAME)
+        if tag is None:
+            return False
+        return all(
+            tag.id in self.tag_controller.tag_ids_by_path.get(str(info.path), set())
+            for info in infos
+        )
+
+    def _update_pick_button(self) -> None:
+        button = getattr(self, "btn_pick", None)
+        if button is None:
+            return
+        infos = self._selected_infos()
+        if not infos:
+            button.config(text="标记精选", state="disabled", fg=TEXT_FAINT)
+            return
+        if self._selected_all_picked(infos):
+            button.config(text="取消精选", state="normal", fg=GREEN)
+        else:
+            button.config(text="标记精选", state="normal", fg=TEXT)
+
+    def _on_pick_key(self, _event=None) -> str:
+        self.toggle_picked()
+        return "break"
+
+    def toggle_picked(self) -> None:
+        """把选中照片标记为“精选”；全部已精选时则取消。"""
+        infos = self._selected_infos()
+        if not infos:
+            return
+        selected_iids = list(self.result_tree.selection())
+        tag = self.tag_controller.get_by_name(PICK_TAG_NAME)
+        if tag is not None and self._selected_all_picked(infos):
+            removed = self.tag_controller.apply_remove(
+                [str(info.path) for info in infos], [tag.id]
+            )
+            message = f"已取消 {len(infos)} 张照片的精选（{len(removed)} 条）"
+        else:
+            tag = self.tag_controller.ensure_tag(PICK_TAG_NAME)
+            added, unknown = self.tag_controller.apply_add(
+                [str(info.path) for info in infos], [tag.id]
+            )
+            message = f"已标记 {len(infos)} 张照片为精选（新增 {len(added)} 条）"
+            if unknown:
+                message += f"，跳过 {len(unknown)} 个未知路径"
+        self._after_tag_change(message)
+        kept = [iid for iid in selected_iids if iid in self.infos_by_iid]
+        if kept:
+            self.result_tree.selection_set(kept)
+            self._on_result_select()
+        self._update_pick_button()
 
     def toggle_quality_sort(self) -> None:
         """在“默认顺序”和“清晰度优先”之间切换。"""
@@ -602,10 +665,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
     def _on_result_select(self, _event=None) -> None:
         selection = self.result_tree.selection()
         if not selection:
+            self._update_pick_button()
             return
         info = self.infos_by_iid.get(selection[0])
         if info is not None:
             self.set_detail(info)
+        self._update_pick_button()
 
     def open_selected(self) -> None:
         """用系统默认程序打开当前照片（双击结果行也会走这里）。"""

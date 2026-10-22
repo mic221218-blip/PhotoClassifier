@@ -12,6 +12,9 @@ import unicodedata
 #: 标签名最大长度（字符数，按 Unicode 码点计）。
 MAX_TAG_NAME_LENGTH = 30
 
+#: “精选”快捷标记复用的用户标签名（不预置，首次使用时创建）。
+PICK_TAG_NAME = "精选"
+
 #: 预置标签：只创建标签，不自动关联任何照片。
 PRESET_TAGS: tuple[str, ...] = (
     "风光",
