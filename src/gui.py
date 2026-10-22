@@ -42,6 +42,7 @@ from src.quality import (
     QualityMeasurement,
 )
 from src.quality_scan import AnalyzeOptions, analyze_photos, rebuild_duplicates
+from src.quality_sort import SORT_DEFAULT, SORT_SHARPNESS, sharpness_key, sharpness_score
 from src.quality_store import QualityStore
 from src.rules import RULE_REGISTRY, RuleEngine, RuleMatch
 from src.tag_controller import TagController
@@ -111,6 +112,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
         self.and_mode = tk.BooleanVar(value=True)
         self.gps_only = tk.BooleanVar(value=False)
         self.quality_ok_var = tk.BooleanVar(value=False)
+        self.sort_mode = SORT_DEFAULT
         self.rule_vars: dict[str, tk.BooleanVar] = {}
         self.quality_vars: dict[str, tk.BooleanVar] = {}
         self.measurements_by_path: dict[str, QualityMeasurement] = {}
@@ -376,6 +378,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
         self.quality_by_iid = {}
         self._ensure_quality_cache(photos)
         self._ensure_tag_cache()
+        if self.sort_mode == SORT_SHARPNESS:
+            photos.sort(
+                key=lambda info: sharpness_key(
+                    info, self.measurements_by_path.get(str(info.path))
+                )
+            )
 
         self.result_tree.delete(*self.result_tree.get_children())
         visible = 0
@@ -393,17 +401,19 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
             if user_tags:
                 user_text = " · ".join(f"★{tag.name}" for tag in user_tags)
                 labels = f"{user_text} ｜ {labels}" if labels else user_text
+            measurement = self.measurements_by_path.get(str(info.path))
             quality_text = " · ".join(
                 _QUALITY_SHORT.get(flag.flag_id, flag.label) for flag in quality_flags
             )
             if not quality_text:
-                measurement = self.measurements_by_path.get(str(info.path))
                 if measurement is None:
                     quality_text = ""
                 elif measurement.error:
                     quality_text = "失败"
                 else:
                     quality_text = "正常"
+            score = sharpness_score(measurement)
+            sharpness_text = "—" if score is None else f"{score:.0f}"
             values = (
                 info.file_name,
                 category_label(info.category),
@@ -413,6 +423,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
                 shutter,
                 labels,
                 quality_text,
+                sharpness_text,
                 format_size(info.size_bytes),
             )
             tags = []
@@ -433,13 +444,39 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
             or self.quality_ok_var.get()
         ):
             filter_note = " · 已筛选"
+        sort_note = " · 按清晰度排序" if self.sort_mode == SORT_SHARPNESS else ""
         self.count_label.config(
-            text=f"库中共 {total:,} 个文件 · 当前显示 {visible:,} 张{filter_note}"
+            text=f"库中共 {total:,} 个文件 · 当前显示 {visible:,} 张{filter_note}{sort_note}"
         )
+        self._update_sort_button()
         if self.current is not None:
             keep = self.infos_by_iid.get(str(self.current.path))
             if keep is not None and str(keep.path) in self.matches_by_iid:
                 self.set_detail(keep)
+
+    def toggle_quality_sort(self) -> None:
+        """在“默认顺序”和“清晰度优先”之间切换。"""
+        if self.sort_mode == SORT_SHARPNESS:
+            self.sort_mode = SORT_DEFAULT
+            self.refresh_results()
+            return
+        if not any(
+            sharpness_score(measurement) is not None
+            for measurement in self.measurements_by_path.values()
+        ):
+            self.status_left.config(text="还没有清晰度数据，请先点“质量分析”")
+            return
+        self.sort_mode = SORT_SHARPNESS
+        self.refresh_results()
+
+    def _update_sort_button(self) -> None:
+        button = getattr(self, "btn_sort_quality", None)
+        if button is None:
+            return
+        if self.sort_mode == SORT_SHARPNESS:
+            button.config(text="清晰度优先 ✓", bg=ACCENT, fg="#ffffff")
+        else:
+            button.config(text="清晰度优先", bg=INPUT_BG, fg=TEXT)
 
     def _ensure_tag_cache(self) -> None:
         self.tag_controller.ensure_loaded()

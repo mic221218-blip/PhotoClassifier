@@ -287,6 +287,8 @@ class PanelsMixin:
         )
         self.count_label = tk.Label(header, text="", bg=WIN_BG, fg=TEXT_SUB, font=self._font(9))
         self.count_label.pack(side="left", padx=(12, 0))
+        self.btn_sort_quality = self._button(header, "清晰度优先", self.toggle_quality_sort)
+        self.btn_sort_quality.pack(side="right")
 
         # 扫描进度视图（扫描时显示，平时隐藏）
         self.progress_frame = tk.Frame(center, bg=WIN_BG)

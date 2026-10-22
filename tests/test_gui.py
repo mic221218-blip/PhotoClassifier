@@ -191,6 +191,12 @@ def row_names(app) -> set[str]:
     return {app.result_tree.item(iid, "values")[0] for iid in app.result_tree.get_children()}
 
 
+def row_names_in_order(app) -> list[str]:
+    return [
+        app.result_tree.item(iid, "values")[0] for iid in app.result_tree.get_children()
+    ]
+
+
 def test_rule_filter_and_mode(root, db_path: Path) -> None:
     app = PhotoClassifierApp(root, db_path)
     seed_rule_rows(app)
@@ -732,5 +738,53 @@ def test_remove_selected_photos_removes_db_record_only(root, db_path: Path, monk
     assert app.db.get_photo("D:/Photos/2026/b.NEF") is None
     assert row_names(app) == {"a.NEF", "c.NEF"}
     assert app.current is None
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_sharpness_sort_button_column_and_restore(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+    seed_quality_rows(app)
+    # 再加一张未分析照片，应该排最后
+    app.db.upsert_photo(make_info(Path("D:/Photos/2026/d.NEF"), taken_at="2026-09-18 22:00:00"))
+    app.refresh_results()
+
+    assert app.sort_mode == "default"
+    assert row_names_in_order(app) == ["a.NEF", "b.NEF", "c.NEF", "d.NEF"]
+
+    app.btn_sort_quality.invoke()
+    assert app.sort_mode == "sharpness"
+    assert row_names_in_order(app) == ["b.NEF", "c.NEF", "a.NEF", "d.NEF"]
+
+    values = {
+        app.result_tree.item(iid, "values")[0]: app.result_tree.item(iid, "values")
+        for iid in app.result_tree.get_children()
+    }
+    assert values["b.NEF"][8] == "500"
+    assert values["c.NEF"][8] == "300"
+    assert values["d.NEF"][8] == "—"
+    assert "按清晰度排序" in app.count_label.cget("text")
+    assert "✓" in app.btn_sort_quality.cget("text")
+
+    # 筛选后排序仍然成立
+    app.quality_ok_var.set(True)
+    app._on_quality_ok_changed()
+    assert row_names_in_order(app) == ["b.NEF"]
+
+    app.clear_filters()
+    app.btn_sort_quality.invoke()
+    assert app.sort_mode == "default"
+    assert row_names_in_order(app) == ["a.NEF", "b.NEF", "c.NEF", "d.NEF"]
+    app.db.close()
+    app.quality_store.close()
+
+
+def test_sharpness_sort_requires_quality_data(root, db_path: Path) -> None:
+    app = PhotoClassifierApp(root, db_path)
+    seed_rule_rows(app)
+    app.btn_sort_quality.invoke()
+    assert app.sort_mode == "default"
+    assert "还没有清晰度数据" in app.status_left.cget("text")
     app.db.close()
     app.quality_store.close()
