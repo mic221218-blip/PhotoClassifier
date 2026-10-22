@@ -176,6 +176,10 @@ presented and filtered through the same layer.
   AND/OR logic as auto tags; a "Quality" column, and a "Quality analysis" block
   in the detail panel (sharpness, contrast, luminance, clipping, duplicate
   group);
+- **Sharpness sort (P1)**: a "Sharpness first" button in the result header sorts
+  by `blur_score` high to low; a numeric "Sharpness" column; unanalyzed / video /
+  failed photos go last; the sort applies to the current view and is not persisted
+  after closing the app;
 - **My tags (V3)**: searchable checkbox list with photo counts on the left;
   chip editing in the detail panel; right-click batch add/remove with single-step
   undo; a tag manager dialog;
@@ -329,7 +333,7 @@ path to the clipboard so you can paste it into Explorer's address bar.
 python -m pytest
 ```
 
-The suite contains **317 tests**. Scanning, EXIF, rules, database and CLI tests
+The suite contains **325 tests**. Scanning, EXIF, rules, database and CLI tests
 use temporary files synthesized to the TIFF / EXIF / PNG specifications
 (`tests/exif_maker.py`); quality tests draw small images with Pillow
 (`tests/image_maker.py`) and cover NEF embedded previews, blur/exposure,
