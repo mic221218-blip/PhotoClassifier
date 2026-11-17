@@ -10,6 +10,7 @@ from src.photo_info import EXIF_ERROR, EXIF_NO_EXIF, EXIF_OK, PhotoInfo
 from src.quality import FLAG_LABELS, QualityFlag
 from src.tag_store import Tag
 from src.tags import TagError, chip_colors, normalize_tag_name
+from src.timelapse import TimelapseStack
 from src.ui_theme import (
     ACCENT,
     BORDER_SOFT,
@@ -29,15 +30,26 @@ from src.ui_theme import (
 class DetailMixin:
     """依赖宿主提供详情面板控件、缓存与引擎。"""
 
-    def set_detail(self, info: PhotoInfo | None) -> None:
+    def set_detail(self, info: PhotoInfo | None, *, stack: TimelapseStack | None = None) -> None:
         """刷新右侧详情面板。"""
         self.current = info
-        self._focus_iid = str(info.path) if info else ""
+        if stack is None:
+            self._focus_iid = str(info.path) if info else ""
+            preview = info
+        else:
+            self._focus_iid = stack.id
+            preview = stack.cover
         if hasattr(self, "gallery"):
-            self.gallery.show_selection(self._focus_iid, self._selected_iids)
-        self._update_gallery_preview(info)
+            self.gallery.focus_photo(self._focus_iid)
+        self._update_gallery_preview(preview)
         self._fill_ai_detail(info)
-        self._draw_preview(info)
+        self._draw_preview(preview)
+        if stack is None:
+            self.timelapse_actions.pack_forget()
+            self.btn_open.master.pack(fill="x", padx=8)
+        else:
+            self.btn_open.master.pack_forget()
+            self.timelapse_actions.pack(fill="x", padx=8, pady=(0, 6))
         for child in self.rules_frame.winfo_children():
             child.destroy()
         for child in self.quality_frame.winfo_children():
@@ -64,6 +76,15 @@ class DetailMixin:
             self.btn_reveal.config(state="disabled", command=None)
             self.btn_copy.config(state="disabled", command=None)
             self.btn_current_pick.config(text="标记精选", state="disabled", fg=TEXT_FAINT)
+            if stack is not None:
+                first = stack.frames[0].taken_at
+                last = stack.frames[-1].taken_at
+                end_time = last.strftime("%H:%M:%S" if first.date() == last.date() else "%Y-%m-%d %H:%M:%S")
+                self.detail_name.config(text=f"延时 · {stack.frame_count:,} 帧")
+                self.detail_meta.config(text=(
+                    f"每 {stack.cadence_seconds:g} 秒一张\n"
+                    f"{first:%Y-%m-%d %H:%M:%S} 至 {end_time}"
+                ))
             return
 
         self.detail_name.config(text=info.file_name)

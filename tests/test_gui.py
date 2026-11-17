@@ -494,6 +494,129 @@ def test_gallery_preview_and_selection_follow_the_current_view(root, db_path, tm
         app.db.close()
 
 
+def test_scan_folds_timelapse_and_selects_all_source_frames(root, db_path, tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from exif_maker import (
+        TAG_DATETIME_ORIGINAL, TAG_ISO, TAG_MAKE, TAG_MODEL, TYPE_SHORT,
+        ascii_value, build_jpeg, build_tiff,
+    )
+
+    monkeypatch.setattr(gui, "RESULT_PAGE_SIZE", 20)
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda title, message: pytest.fail(message))
+    revealed = []
+
+    def reveal(path):
+        revealed.append(path)
+        return True, ""
+
+    monkeypatch.setattr(gui, "open_in_explorer", reveal)
+    library = tmp_path / "photos"
+    library.mkdir()
+    start = datetime(2026, 9, 18, 6, 10)
+    camera = [(TAG_MAKE, *ascii_value("NIKON")), (TAG_MODEL, *ascii_value("NIKON Z6III"))]
+
+    def write_frame(path, taken_at, iso=100):
+        exif = [
+            (TAG_DATETIME_ORIGINAL, *ascii_value(taken_at.strftime("%Y:%m:%d %H:%M:%S"))),
+            (TAG_ISO, TYPE_SHORT, (iso,)),
+        ]
+        path.write_bytes(build_jpeg(build_tiff(camera, exif)))
+
+    frames = [str(library / f"DSC_{index % 10000:04}.JPG") for index in range(9500, 10500)]
+    for index, path in enumerate(frames):
+        write_frame(Path(path), start + timedelta(seconds=5 * index), iso=6400 if index < 2 else 100)
+    burst = {str(library / f"DSC_{index:04}.JPG") for index in range(1000, 1008)}
+    for path in burst:
+        write_frame(Path(path), start + timedelta(hours=2))
+
+    app = PhotoClassifierApp(root, db_path)
+    try:
+        app.db.add_folder(library)
+        app._scan_worker([library])
+        app._poll_scan_queue()
+
+        assert app.db.count_photos() == 1008
+        assert app._page_count() == 1
+        stack_iids = set(app.result_tree.get_children()) - burst
+        assert len(stack_iids) == 1
+        assert burst.issubset(app.result_tree.get_children())
+        stack_iid, = stack_iids
+        card = next(photo for photo in app.gallery._items if photo.tile_id == stack_iid)
+        assert card.title == "延时 · 1,000 帧"
+        assert card.status == "每 5 秒一张"
+        assert str(card.info.path) in frames[499:501]
+        assert stack_iid not in frames
+
+        app._focus_gallery_photo(stack_iid)
+        assert app._focus_iid == stack_iid
+        assert not app._selecting_results
+        assert app._selected_infos() == []
+        app.open_focused_timelapse_folder()
+        assert [path.parent for path in revealed] == [library]
+
+        app.toggle_focused_timelapse()
+        assert app.result_tree.get_children() == tuple(frames[:20])
+        app.change_result_page(1)
+        assert app.result_tree.get_children() == tuple(frames[20:40])
+        app.btn_leave_timelapse.invoke()
+        assert set(app.result_tree.get_children()) == {stack_iid, *burst}
+
+        app.quick_filter_buttons["timelapse"].invoke()
+        assert app.result_tree.get_children() == (stack_iid,)
+        app._focus_gallery_photo(stack_iid)
+        app.select_focused_timelapse()
+        assert {str(info.path) for info in app._selected_infos()} == set(frames)
+        assert app.selection_count["text"] == "已选 1,000 张"
+        app.cancel_result_selection()
+
+        app.quick_filter_buttons["all"].invoke()
+        app.rule_vars["high_iso"].set(True)
+        app._on_filter_changed()
+        assert set(app.result_tree.get_children()) == set(frames[:2])
+        app.start_result_selection()
+        app._select_result_row(frames[0])
+        app.clear_filters()
+        assert app.result_tree.item(stack_iid, "text") == "⊟"
+        assert app.gallery._partial_selection == {stack_iid}
+        assert [str(info.path) for info in app._selected_infos()] == [frames[0]]
+        app._select_result_row(stack_iid)
+        assert app.result_tree.item(stack_iid, "text") == "☑"
+        assert not app.gallery._partial_selection
+        assert {str(info.path) for info in app._selected_infos()} == set(frames)
+        app.cancel_result_selection()
+
+        app.btn_fold_timelapse.invoke()
+        assert app._page_count() == 51
+        assert app.result_tree.get_children() == tuple(sorted(frames)[:20])
+
+        cull = app.quick_filter_buttons["cull"]
+        assert cull["text"] == "筛选组"
+        cull.invoke()
+        assert set(app.result_tree.get_children()) == burst
+        assert {photo.tile_id for photo in app.gallery._items} == burst
+
+        app.start_result_selection()
+        app.toggle_result_page_selection()
+        assert {str(info.path) for info in app._selected_infos()} == burst
+        app.cancel_result_selection()
+
+        app.rule_vars["high_iso"].set(True)
+        app._on_filter_changed()
+        assert not app.result_tree.get_children()
+        app.rule_vars["high_iso"].set(False)
+        app._on_filter_changed()
+
+        app.btn_fold_timelapse.invoke()
+        assert set(app.result_tree.get_children()) == burst
+        app.quick_filter_buttons["all"].invoke()
+        assert set(app.result_tree.get_children()) == {stack_iid, *burst}
+    finally:
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
 def test_app_lists_library_and_results(root, db_path: Path) -> None:
     app = seeded_app(root, db_path)
 

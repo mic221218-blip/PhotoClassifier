@@ -282,6 +282,7 @@ class PanelsMixin:
 
         header = tk.Frame(center, bg=WIN_BG)
         header.pack(fill="x", padx=14, pady=(12, 8))
+        self.btn_leave_timelapse = self._button(header, "返回浏览", self.leave_timelapse)
         self.gallery_title = tk.Label(header, bg=WIN_BG, fg=TEXT, font=self._font(16, bold=True))
         self.gallery_title.pack(side="left")
         self.count_label = tk.Label(header, text="", bg=WIN_BG, fg=TEXT_SUB, font=self._font(9))
@@ -376,6 +377,7 @@ class PanelsMixin:
         self.quick_filter_buttons = {}
         for key, label in (
             ("all", "全部"), ("picked", "精选"), ("issues", "质量问题"), ("duplicates", "重复组"),
+            ("timelapse", "延时叠"), ("cull", "筛选组"),
         ):
             button = self._button(controls, label, lambda key=key: self.set_quick_filter(key))
             button.configure(padx=8)
@@ -390,6 +392,9 @@ class PanelsMixin:
         self.btn_filters = self._button(controls, "筛选", self.toggle_filters)
         self.btn_filters.configure(padx=8)
         self.btn_filters.pack(side="right", padx=(4, 5))
+        self.btn_fold_timelapse = self._button(controls, "折叠延时", self.toggle_timelapse_folding)
+        self.btn_fold_timelapse.configure(padx=8)
+        self.btn_fold_timelapse.pack(side="right", padx=(0, 4))
         self.active_filter_row = tk.Frame(self.result_frame, bg=WIN_BG)
         self.filter_summary = tk.Label(self.active_filter_row, bg=WIN_BG, fg=TEXT_SUB, font=self._font(9))
         self.filter_summary.pack(side="left", padx=(0, 4))
@@ -439,6 +444,16 @@ class PanelsMixin:
         actions_area = tk.Frame(panel, bg=PANEL_BG)
         actions_area.pack(side="bottom", fill="x", pady=(4, 10))
         tk.Frame(actions_area, bg=BORDER_SOFT, height=1).pack(fill="x", padx=18, pady=(0, 10))
+        self.timelapse_actions = tk.Frame(actions_area, bg=PANEL_BG)
+        for column, (label, command) in enumerate((
+            ("展开", self.toggle_focused_timelapse),
+            ("选中整叠", self.select_focused_timelapse),
+            ("打开原文件夹", self.open_focused_timelapse_folder),
+        )):
+            self.timelapse_actions.columnconfigure(column, weight=1)
+            button = self._button(self.timelapse_actions, label, command)
+            button.configure(padx=4)
+            button.grid(row=0, column=column, sticky="ew", padx=1, ipady=2)
         actions = tk.Frame(actions_area, bg=PANEL_BG)
         actions.pack(fill="x", padx=8)
         self.btn_open = self._button(actions, "打开图片", self.open_selected)

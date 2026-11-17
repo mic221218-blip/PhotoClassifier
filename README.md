@@ -183,11 +183,18 @@ presented and filtered through the same layer.
 - **Photo grid**: arrow keys browse photos. Space or double-click opens the
   large preview. Switch to List for the EXIF columns, and double-click a row
   there to open it in the default photo app;
+- **Timelapse stacks**: after scanning, regular sequences of NEF and JPEG photos
+  in the same folder are collapsed into a cover with a frame count. Sequences of
+  10 frames or fewer stay individual, with same-name NEF and JPEG counted as one
+  frame. Double-click a stack to browse it in capture order. Right-click to select
+  all its originals or open their folder. Use the Timelapse filter to find stacks and the fold
+  button to switch between stacked and individual photos;
 - **Detail panel**: collapsible photo preview and tags. Expand Shooting
   Parameters and Analysis for EXIF, quality measurements and matching rules;
 - **Filters and quality analysis**: switch between All, Picks, Quality Issues
-  and Duplicate Groups. The Filters panel includes rules, quality flags, custom
-  tags and AI suggestions. Run quality analysis from More;
+  and Duplicate Groups, or use Cull Group (筛选组) to browse photos outside of
+  timelapse stacks. The Filters panel includes rules, quality flags, custom tags
+  and AI suggestions. Run quality analysis from More;
 - **Sharpness sort (P1)**: a "Sharpness first" button in the result header sorts
   by `blur_score` high to low; a numeric "Sharpness" column; unanalyzed / video /
   failed photos go last; the sort applies to the current view and is not persisted

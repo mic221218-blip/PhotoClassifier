@@ -30,6 +30,7 @@ from src.rules import RULE_REGISTRY, RuleEngine, RuleMatch
 from src.sky_ai import MODEL_VERSION as SKY_MODEL_VERSION
 from src.tag_controller import TagController
 from src.tag_store import Tag, TagStore
+from src.timelapse import TimelapseStack, detect_timelapse
 from src.ui_ai import AIAnalysisMixin
 from src.ui_detail import DetailMixin
 from src.ui_gallery import GalleryPhoto
@@ -88,6 +89,13 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self.quality_by_iid: dict[str, list[QualityFlag]] = {}
         self._rule_cache: dict[str, list[RuleMatch]] = {}
         self._matched_iids: list[str] = []
+        self._result_iids: list[str] = []
+        self._timelapses: dict[str, TimelapseStack] = {}
+        self._timelapse_paths: dict[str, tuple[str, ...]] = {}
+        self._timelapse_by_path: dict[str, str] = {}
+        self._fold_timelapses = True
+        self._opened_timelapse_id: str | None = None
+        self._timelapse_return_page = 0
         self._selected_iids: set[str] = set()
         self._selecting_results = False
         self._selection_anchor = ""
@@ -255,6 +263,9 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         iids = self._selected_iids if self._selecting_results else self.result_tree.selection()
         return [self.infos_by_iid[iid] for iid in sorted(iids) if iid in self.infos_by_iid]
 
+    def _paths_for_row(self, iid: str) -> tuple[str, ...]:
+        return self._timelapse_paths.get(iid, (iid,))
+
     def start_result_selection(self) -> None:
         if self._selecting_results or not self.result_tree.get_children():
             return
@@ -287,24 +298,35 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
     def toggle_result_page_selection(self) -> None:
         if not self._selecting_results:
             return
-        page = set(self.result_tree.get_children())
-        if page <= self._selected_iids:
-            self._selected_iids.difference_update(page)
+        paths = {path for iid in self.result_tree.get_children() for path in self._paths_for_row(iid)}
+        if paths <= self._selected_iids:
+            self._selected_iids.difference_update(paths)
         else:
-            self._selected_iids.update(page)
+            self._selected_iids.update(paths)
         self._selection_anchor = ""
         self._sync_result_selection()
 
     def _sync_result_selection(self) -> None:
         tree = self.result_tree
         page = tree.get_children()
-        selection = tuple(iid for iid in page if iid in self._selected_iids)
-        if tree.selection() != selection:
-            tree.selection_set(selection)
+        selected_rows = []
+        partial_rows = set()
+        # Stack rows are virtual. Keep selection in terms of the original files.
         for iid in page:
-            mark = "☑" if iid in self._selected_iids else "☐"
+            paths = self._paths_for_row(iid)
+            selected_count = sum(path in self._selected_iids for path in paths)
+            mark = "☐"
+            if selected_count == len(paths):
+                selected_rows.append(iid)
+                mark = "☑"
+            elif selected_count:
+                partial_rows.add(iid)
+                mark = "⊟"
             if tree.item(iid, "text") != mark:
                 tree.item(iid, text=mark)
+        selection = tuple(selected_rows)
+        if tree.selection() != selection:
+            tree.selection_set(selection)
         count = len(self._selected_iids)
         self.selection_count.config(text=f"已选 {count:,} 张")
         if count:
@@ -324,7 +346,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         )
         self._update_ai_button()
         self._update_pick_button()
-        self.gallery.show_selection(self._focus_iid, self._selected_iids)
+        self.gallery.show_selection(self._focus_iid, set(selected_rows), partial_rows)
 
     def _on_delete_key(self, _event=None) -> str:
         self.remove_selected_photos()
@@ -455,6 +477,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._browse_folder = folder
         self._sync_library_selection()
         self._result_page = 0
+        self._opened_timelapse_id = None
         if self._selecting_results:
             self.cancel_result_selection()
         self.refresh_results()
@@ -573,6 +596,15 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         previous_infos = self.infos_by_iid
         previous_rules = self._rule_cache
         self.infos_by_iid = {str(info.path): info for info in photos}
+        if previous_infos != self.infos_by_iid:
+            self._timelapses = {stack.id: stack for stack in detect_timelapse(photos)}
+            self._timelapse_paths = {
+                stack.id: tuple(str(info.path) for info in stack.members)
+                for stack in self._timelapses.values()
+            }
+            self._timelapse_by_path = {
+                path: stack_id for stack_id, paths in self._timelapse_paths.items() for path in paths
+            }
         self.matches_by_iid = {}
         self.quality_by_iid = {}
         self._rule_cache = {}
@@ -592,6 +624,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._matched_iids = []
         for info in photos:
             iid = str(info.path)
+            if self._quick_filter == "timelapse" and iid not in self._timelapse_by_path:
+                continue
+            if self._quick_filter == "cull" and iid in self._timelapse_by_path:
+                continue
             matches = previous_rules.get(iid) if previous_infos.get(iid) == info else None
             if matches is None:
                 matches = self.rule_engine.evaluate(info)
@@ -605,19 +641,40 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self.matches_by_iid[iid] = matches
             self.quality_by_iid[iid] = quality_flags
             self._matched_iids.append(iid)
-        self._selected_iids.intersection_update(self.matches_by_iid)
-        if self._focus_iid not in self.matches_by_iid:
-            self._focus_iid = ""
-        if self._selection_anchor not in self.matches_by_iid:
-            self._selection_anchor = ""
         if self._quick_filter == "duplicates":
             self._matched_iids.sort(key=lambda iid: self.duplicates.by_path[iid].group_id)
+        self._refresh_result_rows()
         self._result_page = min(self._result_page, self._page_count() - 1)
         self._render_result_page()
         self._update_sort_button()
-        if self.current is not None:
-            keep = self.infos_by_iid.get(str(self.current.path))
-            self.set_detail(keep if keep is not None and str(keep.path) in self.matches_by_iid else None)
+        if self._focus_iid:
+            if self._focus_iid in self._result_iids:
+                self._show_result_detail(self._focus_iid)
+            else:
+                self.set_detail(None)
+
+    def _refresh_result_rows(self) -> None:
+        opened = self._timelapse_paths.get(self._opened_timelapse_id)
+        if opened is not None:
+            self._result_iids = [path for path in opened if path in self.matches_by_iid]
+            self._selected_iids.intersection_update(self._result_iids)
+        else:
+            self._opened_timelapse_id = None
+            self._selected_iids.intersection_update(self.matches_by_iid)
+            self._result_iids = self._matched_iids
+            if self._fold_timelapses and self._timelapses and self._quick_filter not in ("duplicates", "cull"):
+                # Only fold complete stacks so a row never selects files hidden by a filter.
+                complete = {
+                    stack_id for stack_id, paths in self._timelapse_paths.items()
+                    if all(path in self.matches_by_iid for path in paths)
+                }
+                rows = {}
+                for path in self._matched_iids:
+                    stack_id = self._timelapse_by_path.get(path)
+                    rows[stack_id if stack_id in complete else path] = None
+                self._result_iids = list(rows)
+        if self._selection_anchor not in self._result_iids:
+            self._selection_anchor = ""
 
     def _passes_quick_filter(
         self, flags: list[QualityFlag], tags: list[Tag], picked: Tag | None,
@@ -633,11 +690,53 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
     def set_quick_filter(self, key: str) -> None:
         if key != self._quick_filter:
             self._quick_filter = key
+            self._opened_timelapse_id = None
             self._result_page = 0
             self.refresh_results()
 
+    def toggle_timelapse_folding(self) -> None:
+        self._fold_timelapses = not self._fold_timelapses
+        self._result_page = 0
+        self.refresh_results()
+        self.result_tree.yview_moveto(0)
+
+    def toggle_focused_timelapse(self) -> None:
+        if self._focus_iid not in self._timelapses:
+            return
+        self._opened_timelapse_id = self._focus_iid
+        self._timelapse_return_page = self._result_page
+        self._result_page = 0
+        self.refresh_results()
+        self.result_tree.yview_moveto(0)
+        self._focus_result_widget()
+
+    def leave_timelapse(self) -> None:
+        stack_id = self._opened_timelapse_id
+        if stack_id is None:
+            return
+        self._opened_timelapse_id = None
+        self._result_page = self._timelapse_return_page
+        self.refresh_results()
+        if stack_id in self.result_tree.get_children():
+            self._focus_gallery_photo(stack_id)
+            self.gallery.see_photo(stack_id)
+        self._focus_result_widget()
+
+    def select_focused_timelapse(self) -> None:
+        if self._focus_iid not in self._timelapses:
+            return
+        self.start_result_selection()
+        self._selected_iids.update(self._paths_for_row(self._focus_iid))
+        self._selection_anchor = self._focus_iid
+        self._sync_result_selection()
+
+    def open_focused_timelapse_folder(self) -> None:
+        stack = self._timelapses.get(self._focus_iid)
+        if stack is not None:
+            self._reveal_path(stack.cover.path)
+
     def _page_count(self) -> int:
-        return max(1, (len(self._matched_iids) + RESULT_PAGE_SIZE - 1) // RESULT_PAGE_SIZE)
+        return max(1, (len(self._result_iids) + RESULT_PAGE_SIZE - 1) // RESULT_PAGE_SIZE)
 
     def change_result_page(self, step: int) -> None:
         page = max(0, min(self._result_page + step, self._page_count() - 1))
@@ -651,7 +750,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
 
     def _render_result_page(self) -> None:
         start = self._result_page * RESULT_PAGE_SIZE
-        page = self._matched_iids[start:start + RESULT_PAGE_SIZE]
+        page = self._result_iids[start:start + RESULT_PAGE_SIZE]
         previous = self.result_tree.get_children()
         removed = set(previous).difference(page)
         if removed:
@@ -660,6 +759,17 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         gallery_photos = []
         picked_tag = self.tag_controller.get_by_name(PICK_TAG_NAME)
         for iid in page:
+            stack = self._timelapses.get(iid)
+            if stack is not None:
+                title = f"延时 · {stack.frame_count:,} 帧"
+                cadence = f"每 {stack.cadence_seconds:g} 秒一张"
+                gallery_photos.append(GalleryPhoto(stack.cover, status=cadence, iid=iid, title=title))
+                values = (
+                    title, "延时叠", stack.frames[0].taken_at.isoformat(sep=" "),
+                    stack.cover.camera or "", "", "", cadence, "", "", "",
+                )
+                self._render_result_row(iid, values, [], existing)
+                continue
             info = self.infos_by_iid[iid]
             matches = self.matches_by_iid[iid]
             quality_flags = self.quality_by_iid[iid]
@@ -711,18 +821,15 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
                 tags.append("error")
             elif info.category in ("video", "unsupported"):
                 tags.append("dim")
-            if iid in existing:
-                if (tuple(map(str, self.result_tree.item(iid, "values"))) != tuple(map(str, values))
-                        or self.result_tree.item(iid, "tags") != tuple(tags)):
-                    self.result_tree.item(iid, values=values, tags=tags)
-            else:
-                self.result_tree.insert("", "end", iid=iid, values=values, tags=tags)
+            self._render_result_row(iid, values, tags, existing)
         if tuple(page) != self.result_tree.get_children():
             self.result_tree.set_children("", *page)
         if not self._folder_paths:
             empty = "添加文件夹，开始整理照片"
         elif self._quick_filter in ("issues", "duplicates") and not self.measurements_by_path:
             empty = "从「更多 → 质量分析」分析照片后，可以在这里复核结果。"
+        elif self._quick_filter == "timelapse" and not self._timelapses:
+            empty = "这个范围里还没有识别到延时序列"
         elif self._quick_filter != "all" or not self._filter_selection().is_empty:
             empty = "没有符合当前筛选条件的照片"
         elif self._browse_folder and self.checked_folders and self._browse_folder not in self.checked_folders:
@@ -737,6 +844,14 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self._update_pick_button()
         self._update_page_controls()
 
+    def _render_result_row(self, iid: str, values: tuple, tags: list[str], existing: set[str]) -> None:
+        tree = self.result_tree
+        if iid not in existing:
+            tree.insert("", "end", iid=iid, values=values, tags=tags)
+        elif (tuple(map(str, tree.item(iid, "values"))) != tuple(map(str, values))
+                or tree.item(iid, "tags") != tuple(tags)):
+            tree.item(iid, values=values, tags=tags)
+
     def _update_page_controls(self) -> None:
         pages = self._page_count()
         self.btn_result_prev.config(state="normal" if self._result_page else "disabled")
@@ -748,10 +863,24 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self.btn_result_prev.pack(side="left", before=self.page_status)
             self.btn_result_next.pack(side="left", padx=(5, 10), before=self.page_status)
         self.page_status.config(text=f"第 {self._result_page + 1} / {pages} 页" if pages > 1 else "")
-        self.btn_select_results.config(state="normal" if self._matched_iids else "disabled")
+        self.btn_select_results.config(state="normal" if self._result_iids else "disabled")
         title = self._folder_label(Path(self._browse_folder)) if self._browse_folder else "全部照片"
+        stack = self._timelapses.get(self._opened_timelapse_id)
+        if stack is not None:
+            title = f"延时 · {stack.frame_count:,} 帧"
+            count = f"{len(self._result_iids):,} 张"
+            self.btn_leave_timelapse.pack(side="left", before=self.gallery_title, padx=(0, 8))
+            self.btn_fold_timelapse.config(state="disabled", fg=TEXT_FAINT)
+        else:
+            count = f"{len(self._matched_iids):,} 张"
+            folded = sum(iid in self._timelapses for iid in self._result_iids) if self._timelapses else 0
+            if folded:
+                count += f" · {folded:,} 叠"
+            self.btn_leave_timelapse.pack_forget()
+            self.btn_fold_timelapse.config(state="normal", fg=TEXT)
+        self.btn_fold_timelapse.config(bg=ACCENT_DIM if self._fold_timelapses else INPUT_BG)
         self.gallery_title.config(text=title if len(title) <= 22 else title[:21] + "…")
-        self.count_label.config(text=f"{len(self._matched_iids):,} 张")
+        self.count_label.config(text=count)
         self._update_shortcut_hint()
         for key, button in self.quick_filter_buttons.items():
             button.config(bg=ACCENT_DIM if key == self._quick_filter else INPUT_BG)
@@ -826,10 +955,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         button = getattr(self, "btn_sort_quality", None)
         if button is None:
             return
-        if self.sort_mode == SORT_SHARPNESS:
-            button.config(text="清晰度优先 ✓", bg=ACCENT, fg="#ffffff")
+        if self._opened_timelapse_id is not None:
+            button.config(text="按拍摄时间", bg=INPUT_BG, fg=TEXT_FAINT, state="disabled")
+        elif self.sort_mode == SORT_SHARPNESS:
+            button.config(text="清晰度优先 ✓", bg=ACCENT, fg="#ffffff", state="normal")
         else:
-            button.config(text="清晰度优先", bg=INPUT_BG, fg=TEXT)
+            button.config(text="清晰度优先", bg=INPUT_BG, fg=TEXT, state="normal")
 
     def _ensure_tag_cache(self) -> None:
         self.tag_controller.ensure_loaded()
@@ -1027,13 +1158,16 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
 
     def _update_shortcut_hint(self) -> None:
         hint = ""
-        if self._result_view == "grid" and self._matched_iids:
+        if self._result_view == "grid" and self._result_iids:
             hint = "空格  大图    P  精选" if PILLOW_AVAILABLE else "安装 Pillow 后可查看缩略图"
         self.status_shortcuts.config(text=hint)
 
     def _focus_result_widget(self) -> None:
         widget = self.gallery if self._result_view == "grid" else self.result_tree
         widget.focus_set()
+
+    def _show_result_detail(self, iid: str) -> None:
+        self.set_detail(self.infos_by_iid.get(iid), stack=self._timelapses.get(iid))
 
     def _focus_gallery_photo(self, iid: str) -> None:
         tree = self.result_tree
@@ -1043,7 +1177,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
                 tree.selection_set(iid)
         if self._result_view == "list":
             tree.see(iid)
-        self.set_detail(self.infos_by_iid[iid])
+        self._show_result_detail(iid)
         self._update_pick_button()
 
     def _on_gallery_click(self, event, *, toggle: bool = False, extend: bool = False) -> str:
@@ -1060,7 +1194,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             if previous in self.result_tree.get_children():
                 self._selection_anchor = previous
                 if toggle and previous != iid:
-                    self._selected_iids.add(previous)
+                    self._selected_iids.update(self._paths_for_row(previous))
         self._select_result_row(iid, extend=extend)
         # Clicking the last checked tile returns to regular browsing.
         if checkbox and not self._selected_iids:
@@ -1073,7 +1207,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             return self._on_gallery_click(event)
         if iid:
             self._focus_gallery_photo(iid)
-            self.open_gallery_preview()
+            if iid in self._timelapses:
+                self.toggle_focused_timelapse()
+            else:
+                self.open_gallery_preview()
         return "break"
 
     def _on_gallery_menu(self, event) -> None:
@@ -1135,7 +1272,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         viewer.bind("<Escape>", lambda _event: viewer.destroy())
         viewer.bind("<space>", lambda _event: viewer.destroy())
         viewer.bind("<Destroy>", self._on_preview_destroy)
-        self._update_gallery_preview(self.current)
+        stack = self._timelapses.get(self._focus_iid)
+        self._update_gallery_preview(stack.cover if stack is not None else self.current)
         viewer.focus_set()
         return "break"
 
@@ -1180,7 +1318,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             if previous:
                 self._selection_anchor = previous[0]
                 if toggle:
-                    self._selected_iids.add(previous[0])
+                    self._selected_iids.update(self._paths_for_row(previous[0]))
         tree.focus_set()
         self._select_result_row(iid, extend=extend)
         return "break"
@@ -1190,13 +1328,17 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         page = tree.get_children()
         if extend and self._selection_anchor in page:
             first, last = sorted((page.index(self._selection_anchor), page.index(iid)))
-            self._selected_iids.difference_update(page)
-            self._selected_iids.update(page[first:last + 1])
+            self._selected_iids.difference_update(path for row in page for path in self._paths_for_row(row))
+            self._selected_iids.update(path for row in page[first:last + 1] for path in self._paths_for_row(row))
         else:
-            self._selected_iids.symmetric_difference_update((iid,))
+            paths = self._paths_for_row(iid)
+            if all(path in self._selected_iids for path in paths):
+                self._selected_iids.difference_update(paths)
+            else:
+                self._selected_iids.update(paths)
             self._selection_anchor = iid
         tree.focus(iid)
-        self.set_detail(self.infos_by_iid[iid])
+        self._show_result_detail(iid)
         self._sync_result_selection()
 
     def _on_result_space(self, _event) -> str:
@@ -1211,6 +1353,11 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if self._selecting_results:
             return self._on_result_click(event)
         if self.result_tree.identify_region(event.x, event.y) == "cell":
+            iid = self.result_tree.identify_row(event.y)
+            if iid in self._timelapses:
+                self._show_result_detail(iid)
+                self.toggle_focused_timelapse()
+                return "break"
             self.open_selected()
         return None
 
@@ -1218,8 +1365,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if self._selecting_results:
             return
         selection = self.result_tree.selection()
-        if selection and self.current != self.infos_by_iid[selection[0]]:
-            self.set_detail(self.infos_by_iid[selection[0]])
+        if selection and self._focus_iid != selection[0]:
+            self._show_result_detail(selection[0])
         self._update_pick_button()
 
     def open_selected(self) -> None:
@@ -1233,9 +1380,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             messagebox.showwarning("打开图片", error)
 
     def reveal_selected(self) -> None:
-        if self.current is None:
-            return
-        target = self.current.path
+        if self.current is not None:
+            self._reveal_path(self.current.path)
+
+    def _reveal_path(self, target: Path) -> None:
         ok, error = open_in_explorer(target)
         if ok:
             self.status_left.config(text=f"已在资源管理器中定位：{target.name}")

@@ -109,17 +109,26 @@ class TagDialogsMixin:
         if not self._selecting_results and iid not in self.result_tree.selection():
             self.result_tree.selection_set(iid)
             self.result_tree.focus(iid)
-        self.set_detail(self.infos_by_iid[iid])
+        self._show_result_detail(iid)
         count = len(self._selected_infos())
         batch_state = "normal" if count else "disabled"
         menu = tk.Menu(self.root, tearoff=0, bg=CARD_BG, fg=TEXT, activebackground=ACCENT_DIM)
-        menu.add_command(label="打开图片", command=self.open_selected)
-        menu.add_command(label="打开文件位置", command=self.reveal_selected)
+        if iid in self._timelapses:
+            menu.add_command(label="展开延时叠", command=self.toggle_focused_timelapse)
+            menu.add_command(label="选中整叠", command=self.select_focused_timelapse)
+            menu.add_command(label="打开原文件夹", command=self.open_focused_timelapse_folder)
+            if not count:
+                menu.tk_popup(event.x_root, event.y_root)
+                return
+        else:
+            menu.add_command(label="打开图片", command=self.open_selected)
+            menu.add_command(label="打开文件位置", command=self.reveal_selected)
         menu.add_separator()
         menu.add_command(label=f"添加标签…（{count} 张）", command=self.batch_add_tags, state=batch_state)
         menu.add_command(label=f"移除标签…（{count} 张）", command=self.batch_remove_tags, state=batch_state)
-        menu.add_separator()
-        menu.add_command(label="复制路径", command=self.copy_selected_path)
+        if iid not in self._timelapses:
+            menu.add_separator()
+            menu.add_command(label="复制路径", command=self.copy_selected_path)
         menu.add_separator()
         menu.add_command(
             label="取消精选" if self._selected_all_picked() else "标记精选",

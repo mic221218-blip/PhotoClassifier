@@ -17,6 +17,12 @@ class GalleryPhoto:
     info: PhotoInfo
     picked: bool = False
     status: str = ""
+    iid: str | None = None
+    title: str | None = None
+
+    @property
+    def tile_id(self) -> str:
+        return self.iid if self.iid is not None else str(self.info.path)
 
 
 def _load_tile(info: PhotoInfo, size: tuple[int, int]):
@@ -40,6 +46,7 @@ class PhotoGallery(tk.Canvas):
         self._indices: dict[str, int] = {}
         self._focused = ""
         self._selected: set[str] = set()
+        self._partial_selection: set[str] = set()
         self._columns = 1
         self._width = 1
         self._height = 1
@@ -61,7 +68,7 @@ class PhotoGallery(tk.Canvas):
         return self._columns
 
     def show_photos(self, photos: list[GalleryPhoto], empty_message: str) -> None:
-        indices = {str(photo.info.path): index for index, photo in enumerate(photos)}
+        indices = {photo.tile_id: index for index, photo in enumerate(photos)}
         if indices != self._indices:
             self.yview_moveto(0)
         self._items = photos
@@ -69,9 +76,13 @@ class PhotoGallery(tk.Canvas):
         self._empty_message = empty_message
         self._schedule_draw()
 
-    def show_selection(self, focused: str, selected: set[str]) -> None:
-        self._focused = focused
+    def show_selection(self, focused: str, selected: set[str], partial: set[str] | None = None) -> None:
         self._selected = selected.copy()
+        self._partial_selection = partial.copy() if partial is not None else set()
+        self.focus_photo(focused)
+
+    def focus_photo(self, iid: str) -> None:
+        self._focused = iid
         self._schedule_draw()
 
     def hit(self, x: int, y: int) -> tuple[str, bool]:
@@ -87,7 +98,7 @@ class PhotoGallery(tk.Canvas):
                 or dx >= self._width or dy >= self._height + self.CAPTION):
             return "", False
         in_box = 8 <= dx <= 8 + self.CHECKBOX and 8 <= dy <= 8 + self.CHECKBOX
-        return str(self._items[index].info.path), in_box
+        return self._items[index].tile_id, in_box
 
     def see_photo(self, iid: str) -> None:
         if iid not in self._indices:
@@ -151,12 +162,13 @@ class PhotoGallery(tk.Canvas):
     def _draw_tile(self, index: int, images: dict) -> None:
         photo = self._items[index]
         info = photo.info
-        iid = str(info.path)
+        iid = photo.tile_id
         row, column = divmod(index, self._columns)
         x = self.GAP + column * (self._width + self.GAP)
         y = self.GAP + row * self._step
         right, bottom = x + self._width, y + self._height
         checked = iid in self._selected
+        partial = iid in self._partial_selection
         focused = iid == self._focused
         self.create_rectangle(x, y, right, bottom, fill=CARD_BG, outline="")
         size = (self._width - 2, self._height - 2)
@@ -165,7 +177,7 @@ class PhotoGallery(tk.Canvas):
         if PILLOW_AVAILABLE and is_supported(info.category):
             # Size buckets keep small window resizes from decoding every image again.
             target = tuple(max(32, (length + 31) // 32 * 32) for length in size)
-            key = (iid, info.size_bytes, info.file_mtime_ns, info.modified_at, target)
+            key = (str(info.path), info.size_bytes, info.file_mtime_ns, info.modified_at, target)
             if key in self._cache:
                 decoded = self._cache[key]
                 self._cache.move_to_end(key)
@@ -190,22 +202,24 @@ class PhotoGallery(tk.Canvas):
         else:
             self.create_text((x + right) // 2, (y + bottom) // 2, text=message, fill=TEXT_SUB, font=self._font)
         self.create_rectangle(
-            x, y, right, bottom, outline=ACCENT if focused or checked else BORDER_SOFT,
+            x, y, right, bottom, outline=ACCENT if focused or checked or partial else BORDER_SOFT,
             width=2 if focused else 1,
         )
         box_x, box_y = x + 8, y + 8
         self.create_rectangle(
             box_x, box_y, box_x + self.CHECKBOX, box_y + self.CHECKBOX,
-            outline=TEXT, fill=ACCENT if checked else WIN_BG,
+            outline=TEXT, fill=ACCENT if checked or partial else WIN_BG,
         )
         if checked:
             self.create_line(
                 box_x + 5, box_y + 11, box_x + 9, box_y + 15, box_x + 17, box_y + 7,
                 fill=TEXT, width=2,
             )
+        elif partial:
+            self.create_line(box_x + 5, box_y + 11, box_x + 17, box_y + 11, fill=TEXT, width=2)
         status = "  ".join(part for part in ("★" if photo.picked else "", photo.status) if part)
         status_width = self._font.measure(status) + 16 if status else 8
-        name = info.file_name
+        name = photo.title if photo.title is not None else info.file_name
         if self._font.measure(name) > self._width - status_width - 7:
             while name and self._font.measure(name + "…") > self._width - status_width - 7:
                 name = name[:-1]
