@@ -9,7 +9,7 @@ from tkinter import messagebox
 from src.database import PhotoDatabase
 from src.person_ai import analyze_selection as analyze_person_selection
 from src.photo_info import PhotoInfo
-from src.preview import PILLOW_AVAILABLE, is_supported
+from src.preview import is_supported
 from src.sky_ai import analyze_selection as analyze_sky_selection
 from src.ui_theme import ACCENT, INPUT_BG, TEXT_FAINT
 
@@ -84,16 +84,12 @@ class AIAnalysisMixin:
             self.progress_detail.config(text="")
             self.progress_current.config(text="正在准备照片……")
             self.btn_cancel.config(command=self.cancel_ai_analysis)
-            for button in (self.btn_scan, self.btn_analyze, self.btn_browse,
-                           self.btn_add, self.btn_remove, self.btn_rescan):
-                button.config(state="disabled")
+            self._update_scan_controls("AI 分析中…")
         else:
             self.progress_frame.pack_forget()
             self.result_frame.pack(fill="both", expand=True)
             self.btn_cancel.config(command=self.cancel_scan)
-            for button in (self.btn_scan, self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
-                button.config(state="normal")
-            self.btn_analyze.config(state="normal" if PILLOW_AVAILABLE else "disabled")
+            self._update_scan_controls()
 
     def cancel_ai_analysis(self) -> None:
         self.ai_cancel.set()

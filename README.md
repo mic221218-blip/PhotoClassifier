@@ -161,7 +161,7 @@ presented and filtered through the same layer.
   Add tag… / Remove tag… / Copy Path / **Remove from library…**), count
   confirmation, and **Ctrl+Z** single-step undo; the Delete key removes selected
   records too (database only, files are never deleted);
-- **Filtering**: "My tags" in the left panel with search, checkboxes and photo
+- **Filtering**: "My tags" under Filters with search, checkboxes and photo
   counts; it shares the same AND/OR as rules and quality (single implementation
   in `src/filtering.py`);
 - **Display**: user tags come first in the result column with a `★` prefix,
@@ -174,36 +174,32 @@ presented and filtered through the same layer.
 - **CLI**: `tags`, `tag add/remove/list/rename/delete`, `filter --tags`; `show`
   prints a photo's tags.
 
-### GUI Shell (GUI V1.5) ✅
+### Desktop interface ✅
 
-- **Folder library**: import multiple folders, tick the ones to scan, scan
-  them one after another;
+- **Folder library**: click a folder to browse it or choose All Photos. Set the
+  scan scope separately under More → Scan scope;
 - **Background scanning**: progress bar + current file + live success/error
   counts, cancellable at any time;
-- **Results list**: file name, type, capture time, camera, ISO, shutter, size;
-- **Detail panel**: full photo information (same fields as the database) +
-  `Open Photo` (Windows Photos), `Reveal in Explorer` and `Copy Path`;
-- **Double-click a result row** to open the photo in Windows Photos (it no
-  longer just reveals the containing folder);
-- **Quality analysis**: the "Quality analysis (V2.5)" checkboxes (blur / motion
-  blur / overexposed / underexposed / black frame / duplicate) share the same
-  AND/OR logic as auto tags; a "Quality" column, and a "Quality analysis" block
-  in the detail panel (sharpness, contrast, luminance, clipping, duplicate
-  group);
+- **Photo grid**: arrow keys browse photos. Space or double-click opens the
+  large preview. Switch to List for the EXIF columns, and double-click a row
+  there to open it in the default photo app;
+- **Detail panel**: collapsible photo preview and tags. Expand Shooting
+  Parameters and Analysis for EXIF, quality measurements and matching rules;
+- **Filters and quality analysis**: switch between All, Picks, Quality Issues
+  and Duplicate Groups. The Filters panel includes rules, quality flags, custom
+  tags and AI suggestions. Run quality analysis from More;
 - **Sharpness sort (P1)**: a "Sharpness first" button in the result header sorts
   by `blur_score` high to low; a numeric "Sharpness" column; unanalyzed / video /
   failed photos go last; the sort applies to the current view and is not persisted
   after closing the app;
 - **Quick pick (P2)**: select photos and click "Pick" or press `P`; when all
   selected photos are already picked the button turns into "Unpick"; it reuses
-  the "精选" tag, so the left tag list filters them and `Ctrl+Z` undoes;
-- **My tags (V3)**: searchable checkbox list with photo counts on the left;
+  the "精选" tag, so the Picks filter shows them and `Ctrl+Z` undoes;
+- **My tags (V3)**: searchable checkbox list with photo counts under Filters;
   chip editing in the detail panel; right-click batch add/remove with single-step
   undo; a tag manager dialog;
-- **Placeholders**: parameter conditions (V4), export / import to Lightroom (V5)
-  are drawn but disabled until their versions land;
-- Default window 1660×900; the left and right panels scroll with the mouse wheel
-  when their content is taller than the window;
+- Grid thumbnails and large previews use Pillow (see `requirements-quality.txt`)
+  and support JPEG, PNG and NEF files with embedded JPEG previews;
 - Launch: the desktop shortcut (pointing at `run_gui.pyw`), or
   `python -m src.gui` / `pythonw run_gui.pyw`.
 
@@ -211,13 +207,13 @@ presented and filtered through the same layer.
 
 ### Person and sky AI preview
 
-Click a filename to preview it. Choose **选择照片** to enter selection mode, then click anywhere on a row or its checkbox to select or deselect it. Ctrl-click or press Space to toggle one row. Shift-click selects a range on the current page. Selections carry across pages, and **全选本页** selects every item on the current page. Click **取消选择** or press Escape to clear the selection across all pages and return to browsing. When filters change, matching items stay selected.
+Use a thumbnail checkbox or enter multi-select mode with **多选**. You can also Ctrl-click to toggle a photo or Shift-click to select a range on the current page. Selections carry across pages, and **全选本页** selects the current page. Click **清除选择** or press Escape to return to browsing. When filters change, matching photos stay selected.
 
 Choose people, sky, or both from **AI 分析**. If the selection contains unsupported files such as videos, the button displays the number of photos it can analyze.
 
-Use **AI 建议** in the sidebar to filter results and inspect individual suggestions in the details pane. A photo can receive both suggestions. Sky can also be a meaningful part of a cityscape, sunrise, or sunset. Suggestions are stored in the local catalog separately from manual tags. Canceling keeps completed results. JPEG, PNG, and NEF files with embedded previews are supported.
+Use **AI 建议** under **筛选** or inspect individual suggestions in the details pane. A photo can receive both suggestions. Suggestions are stored in the local catalog separately from manual tags. Canceling keeps completed results. JPEG, PNG, and NEF files with embedded previews are supported.
 
-**开始扫描** reuses records with matching file sizes and modification times. Use **全量重扫** or the CLI option `scan --full` to reread all files.
+**扫描新文件** reuses records with matching file sizes and modification times. Use **更多 → 全量重扫** or the CLI option `scan --full` to reread files in scope.
 
 This feature uses the optional dependencies in `requirements-ai.txt` and local YOLOX-Tiny and CLIP ViT-B/32 int8 weights under `models/`. An existing cache with the same structure under `.dsh_work/models/` also works. The four relative paths are `yolox_tiny.onnx`, `clip/int8/vision_model_int8.onnx`, `clip/int8/text_model_int8.onnx`, and `clip/tokenizer.json`.
 

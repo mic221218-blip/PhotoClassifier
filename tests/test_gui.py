@@ -12,7 +12,6 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -214,6 +213,7 @@ def test_selection_mode_toggles_rows_and_cancels_across_pages(root, db_path, tmp
             make_info(tmp_path / "d.mp4", category="video"),
         ])
         app.refresh_results()
+        app.set_result_view("list")
         root.deiconify()
         root.update()
         tree = app.result_tree
@@ -294,6 +294,7 @@ def test_ctrl_and_shift_click_update_ai_checks_and_row_selection(root, db_path, 
             make_info(tmp_path / "e.jpg", category="jpeg"),
         ])
         app.refresh_results()
+        app.set_result_view("list")
         root.deiconify()
         root.update()
         tree = app.result_tree
@@ -406,7 +407,7 @@ def test_thumbnail_displays_latest_selection(root, db_path, tmp_path, monkeypatc
     release = threading.Event()
     app = PhotoClassifierApp(root, db_path)
 
-    def load(info):
+    def load(info, _size):
         if info.file_name == "old.JPG":
             started.set()
             assert release.wait(3)
@@ -427,6 +428,67 @@ def test_thumbnail_displays_latest_selection(root, db_path, tmp_path, monkeypatc
         assert len(app._thumbnail_cache) == 2
     finally:
         release.set()
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
+def test_gallery_preview_and_selection_follow_the_current_view(root, db_path, tmp_path, monkeypatch):
+    Image = pytest.importorskip("PIL.Image")
+    from src.exif_reader import read_photo_info
+
+    monkeypatch.setattr(gui, "RESULT_PAGE_SIZE", 2)
+    app = PhotoClassifierApp(root, db_path)
+    try:
+        app.db.add_folder(tmp_path)
+        infos = []
+        for index, color in enumerate(("red", "blue", "green")):
+            path = tmp_path / f"{index}.jpg"
+            Image.new("RGB", (640, 400), color).save(path)
+            infos.append(read_photo_info(path, "jpeg"))
+        app.db.upsert_many(infos)
+        app.refresh_library()
+        app.refresh_results()
+        root.deiconify()
+        root.update()
+        deadline = time.monotonic() + 5
+        while len(app.gallery._images) < 2 and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        assert len(app.gallery._images) == 2
+        assert app.gallery.winfo_ismapped()
+        assert not app.result_tree.winfo_ismapped()
+
+        app.gallery.event_generate("<Button-1>", x=70, y=60, time=1000)
+        assert app.current == infos[0]
+        assert not app.selection_actions.winfo_manager()
+        app.gallery.event_generate("<Button-1>", x=24, y=24, time=2000)
+        assert app.selection_count["text"] == "已选 1 张"
+        assert app.selection_actions.winfo_manager()
+        app.set_result_view("list")
+        assert app.result_tree.selection() == (str(infos[0].path),)
+        app.set_result_view("grid")
+        app.btn_cancel_selection.invoke()
+        assert not app.selection_actions.winfo_manager()
+
+        app.btn_current_pick.invoke()
+        assert app.btn_current_pick["text"] == "取消精选"
+        app.quick_filter_buttons["picked"].invoke()
+        assert row_names(app) == {infos[0].file_name}
+        app.quick_filter_buttons["all"].invoke()
+        app.open_gallery_preview()
+        assert app._preview_window.title() == infos[0].file_name
+        app._navigate_gallery(0, 1)
+        app._navigate_gallery(0, 1)
+        assert app._result_page == 1
+        assert app._preview_window.title() == infos[2].file_name
+        app._preview_window.destroy()
+        app.toggle_detail_panel()
+        assert not app.detail_panel.winfo_manager()
+        app.toggle_detail_panel()
+        assert app.detail_panel.winfo_manager()
+    finally:
+        root.withdraw()
         app.tag_store.close()
         app.quality_store.close()
         app.db.close()
@@ -533,6 +595,7 @@ def test_copy_path_puts_path_on_clipboard(root, db_path: Path) -> None:
 
 def seed_rule_rows(app) -> None:
     """A=夜景+高感，B=只有夜景，C=只有高感。"""
+    app.db.add_folder("D:/Photos/2026")
     app.db.upsert_many(
         [
             make_info(
@@ -793,16 +856,24 @@ def test_analysis_worker_writes_quality(root, db_path: Path, tmp_path: Path) -> 
 # --------------------------------------------------------------------------- #
 
 
-def test_clicking_library_row_selects_it(root, db_path: Path, monkeypatch) -> None:
+def test_browsing_folder_keeps_the_scan_scope(root, db_path: Path) -> None:
     app = PhotoClassifierApp(root, db_path)
     app.db.add_folder("D:/Photos/2026")
+    app.db.add_folder("D:/Photos/2025")
+    app.db.upsert_many([
+        make_info(Path("D:/Photos/2025/last.JPG")),
+        make_info(Path("D:/Photos/2026/this.JPG")),
+    ])
     app.refresh_library()
-    item = app.library_tree.get_children()[0]
-
-    monkeypatch.setattr(app.library_tree, "identify_row", lambda _y: item)
-    app._on_library_click(SimpleNamespace(y=0))
-
+    item, other = app.library_tree.get_children()
+    app.checked_folders = {other}
+    app.library_tree.selection_set(item)
+    app._on_library_select()
     assert app.library_tree.selection() == (item,)
+    assert row_names(app) == {"last.JPG"}
+    assert app._scan_paths(app._folder_paths) == [Path(other)]
+    app.btn_library_all.invoke()
+    assert row_names(app) == {"last.JPG", "this.JPG"}
     app.db.close()
     app.quality_store.close()
 
@@ -813,15 +884,15 @@ def test_remove_selected_folder_works_after_click(root, db_path: Path, monkeypat
     app.refresh_library()
     item = app.library_tree.get_children()[0]
 
-    monkeypatch.setattr(app.library_tree, "identify_row", lambda _y: item)
-    app._on_library_click(SimpleNamespace(y=0))
-    assert item in app.checked_folders
+    app.library_tree.selection_set(item)
+    app._on_library_select()
+    assert app._browse_folder == item
 
     monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
     app.remove_selected_folder()
 
     assert app.db.list_folders() == []
-    assert item not in app.checked_folders
+    assert app._browse_folder is None
     app.db.close()
     app.quality_store.close()
 
@@ -1134,7 +1205,6 @@ def test_sharpness_sort_button_column_and_restore(root, db_path: Path) -> None:
     assert values["b.NEF"][8] == "500"
     assert values["c.NEF"][8] == "300"
     assert values["d.NEF"][8] == "—"
-    assert "按清晰度排序" in app.count_label.cget("text")
     assert "✓" in app.btn_sort_quality.cget("text")
 
     # 筛选后排序仍然成立

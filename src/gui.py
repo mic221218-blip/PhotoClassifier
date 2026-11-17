@@ -1,21 +1,4 @@
-"""PhotoClassifier GUI 外壳（GUI V1.5，Tkinter 实现）。
-
-按已确认的 UI 设计稿（docs/ui-design.md）实现第一版界面：
-
-- 顶部工具栏：文件夹路径 + 浏览… + 开始扫描（V1.5 能力）；
-- 左侧：文件夹库（多文件夹、勾选参与扫描，V1.5 能力）
-  + 筛选面板（V3/V4 占位，禁用）；
-- 中部：扫描结果列表（文件信息，V1.5 能力）+ 扫描进度视图（可取消）；
-- 右侧：详情面板（完整照片信息；打开文件位置 / 复制路径可用，
-  导出与导入到 Lightroom 为 V5 占位）；
-- 底部状态栏：扫描报告摘要 + 数据库位置。
-
-技术说明：设计文档原定 PySide6，但当前环境无法访问 PyPI，
-故第一版用标准库 Tkinter 实现同样的布局与交互；模块按"界面构建 + 数据刷新"
-组织，后续如迁移 PySide6 可以复用数据库层与扫描流程。
-
-安全原则：GUI 全程只读原始照片，绝不删除 / 移动 / 修改任何文件。
-"""
+"""PhotoClassifier 桌面界面。扫描和标签操作均只读访问原始照片。"""
 
 from __future__ import annotations
 
@@ -24,7 +7,7 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 
 from src.database import PhotoDatabase
@@ -32,10 +15,9 @@ from src.duplicates import DuplicateResult
 from src.filtering import FilterSelection, matches as selection_matches
 from src.formatting import format_shutter, format_size
 from src.person_ai import MODEL_VERSION as PERSON_MODEL_VERSION
-from src.photo_info import EXIF_ERROR, EXIF_NO_EXIF, EXIF_OK, PhotoInfo
+from src.photo_info import EXIF_ERROR, PhotoInfo
 from src.preview import PILLOW_AVAILABLE, is_supported
 from src.quality import (
-    FLAG_IDS,
     FLAG_LABELS,
     QualityEngine,
     QualityFlag,
@@ -48,18 +30,13 @@ from src.rules import RULE_REGISTRY, RuleEngine, RuleMatch
 from src.sky_ai import MODEL_VERSION as SKY_MODEL_VERSION
 from src.tag_controller import TagController
 from src.tag_store import Tag, TagStore
-from src.ui_detail import DetailMixin
-from src.ui_panels import PanelsMixin
 from src.ui_ai import AIAnalysisMixin
-from src.ui_thumbnail import ThumbnailMixin
+from src.ui_detail import DetailMixin
+from src.ui_gallery import GalleryPhoto
+from src.ui_panels import PanelsMixin
 from src.ui_tag_dialogs import TagDialogsMixin
-from src.tags import (
-    PICK_TAG_NAME,
-    TagConflict,
-    TagError,
-    chip_colors,
-    normalize_tag_name,
-)
+from src.ui_thumbnail import PreviewCanvas, ThumbnailMixin
+from src.tags import PICK_TAG_NAME
 from src.scan_catalog import scan_catalog
 from src.shell import open_in_explorer, open_with_default_app
 
@@ -69,16 +46,13 @@ from src.ui_theme import (  # noqa: E402  (主题常量集中管理)
     BORDER_SOFT,
     CARD_BG,
     DEFAULT_DB,
-    DETAIL_FIELDS as _DETAIL_FIELDS,
     GREEN,
     ICON_PATH,
     INPUT_BG,
     ORANGE,
     PANEL_BG,
-    PREVIEW_COLORS as _PREVIEW_COLORS,
     PROJECT_ROOT,
     QUALITY_SHORT as _QUALITY_SHORT,
-    RESULT_COLUMNS as _RESULT_COLUMNS,
     TEXT,
     TEXT_FAINT,
     TEXT_SUB,
@@ -87,6 +61,7 @@ from src.ui_theme import (  # noqa: E402  (主题常量集中管理)
 )
 
 RESULT_PAGE_SIZE = 250
+
 
 class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMixin, ThumbnailMixin):
     """主窗口应用。``root`` 由调用方创建，方便测试与自检。"""
@@ -101,6 +76,13 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self.tag_controller = TagController(self.tag_store)
 
         self.checked_folders: set[str] = set()
+        self._browse_folder: str | None = None
+        self._folder_paths: list[Path] = []
+        self._result_view = "grid"
+        self._quick_filter = "all"
+        self._focus_iid = ""
+        self._preview_window: tk.Toplevel | None = None
+        self._fonts: dict[tuple[int, bool], tkfont.Font] = {}
         self.infos_by_iid: dict[str, PhotoInfo] = {}
         self.matches_by_iid: dict[str, list[RuleMatch]] = {}
         self.quality_by_iid: dict[str, list[QualityFlag]] = {}
@@ -110,7 +92,6 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._selecting_results = False
         self._selection_anchor = ""
         self._result_page = 0
-        self._catalog_total = 0
         self.current: PhotoInfo | None = None
         self.scan_thread: threading.Thread | None = None
         self.cancel_event = threading.Event()
@@ -148,6 +129,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._build_detail_panel()
         self._build_center()
 
+        self.set_result_view("grid", focus=False)
+        self.btn_detail.config(bg=ACCENT_DIM)
         self.refresh_library()
         self.refresh_tags()
         self.refresh_results()
@@ -160,14 +143,16 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
     def _on_mousewheel(self, event) -> None:
         """鼠标在左侧筛选栏 / 右侧详情栏上时滚动对应面板。"""
         widget = self.root.winfo_containing(event.x_root, event.y_root)
+        steps = max(1, abs(event.delta) // 120) * (3 if event.delta < 0 else -3)
         while widget is not None:
-            if widget is getattr(self, "left_canvas", None):
-                self.left_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-                return
-            if widget is getattr(self, "detail_canvas", None):
-                self.detail_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            if widget in (self.left_canvas, self.detail_canvas):
+                widget.yview_scroll(steps, "units")
                 return
             widget = widget.master
+
+    def _on_sidebar_wheel(self, event) -> str:
+        event.widget.yview_scroll(-3 if event.delta > 0 else 3, "units")
+        return "break"
 
     # ------------------------------------------------------------------ #
     # 窗口与样式
@@ -175,8 +160,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
 
     def _setup_window(self) -> None:
         self.root.title("PhotoClassifier")
-        self.root.geometry("1660x900")
-        self.root.minsize(1200, 700)
+        screen_width = self.root.winfo_screenwidth() - 40
+        screen_height = self.root.winfo_screenheight() - 80
+        self.root.geometry(f"{min(1660, screen_width)}x{min(900, screen_height)}")
+        self.root.minsize(min(1200, screen_width), min(700, screen_height))
         self.root.configure(bg=WIN_BG)
         if ICON_PATH.exists():
             try:
@@ -185,7 +172,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
                 pass
 
     def _font(self, size=10, bold=False):
-        return tkfont.Font(family="Microsoft YaHei", size=size, weight="bold" if bold else "normal")
+        key = size, bold
+        if key not in self._fonts:
+            self._fonts[key] = tkfont.Font(
+                root=self.root, family="Microsoft YaHei", size=size, weight="bold" if bold else "normal",
+            )
+        return self._fonts[key]
 
     def _build_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -197,12 +189,17 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             "Treeview",
             background=CARD_BG,
             fieldbackground=CARD_BG,
+            bordercolor=BORDER_SOFT,
+            lightcolor=BORDER_SOFT,
             foreground=TEXT,
             rowheight=28,
             borderwidth=0,
             font=self._font(10),
         )
-        style.map("Treeview", background=[("selected", ACCENT_DIM)], foreground=[("selected", TEXT)])
+        style.map(
+            "Treeview", background=[("selected", ACCENT_DIM)], foreground=[("selected", TEXT)],
+            bordercolor=[("focus", ACCENT_DIM)], lightcolor=[("focus", ACCENT_DIM)],
+        )
         style.configure(
             "Treeview.Heading",
             background=PANEL_BG,
@@ -218,8 +215,16 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             borderwidth=0,
             thickness=10,
         )
-        style.configure("Vertical.TScrollbar", background=INPUT_BG, troughcolor=WIN_BG, borderwidth=0)
-        style.configure("Horizontal.TScrollbar", background=INPUT_BG, troughcolor=WIN_BG, borderwidth=0)
+        for direction, sticky in (("Vertical", "ns"), ("Horizontal", "we")):
+            name = f"{direction}.TScrollbar"
+            element = f"{direction}.Scrollbar"
+            style.layout(name, [(f"{element}.trough", {
+                "sticky": sticky, "children": [(f"{element}.thumb", {"sticky": "nswe"})],
+            })])
+            style.configure(
+                name, background="#454753", troughcolor=WIN_BG, bordercolor=WIN_BG,
+                lightcolor="#454753", darkcolor="#454753", gripcount=0, arrowsize=10,
+            )
 
     def _button(self, parent, text, command=None, *, primary=False, disabled=False, width=None):
         btn = tk.Button(
@@ -255,10 +260,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             return
         self._selecting_results = True
         self.btn_select_results.pack_forget()
-        self.selection_actions.pack(fill="x")
+        self.btn_select_page.pack(side="right")
         self.result_tree.configure(show="tree headings", selectmode="none")
         self.result_tree.xview_moveto(0)
-        self.result_tree.focus_set()
+        self._focus_result_widget()
         self._sync_result_selection()
 
     def cancel_result_selection(self) -> None:
@@ -267,9 +272,11 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._selection_anchor = ""
         self.result_tree.focus("")
         self.result_tree.configure(show="headings", selectmode="extended")
-        self.selection_actions.pack_forget()
-        self.btn_select_results.pack(side="left", padx=8, pady=5)
+        self.btn_select_page.pack_forget()
+        self.btn_select_results.pack(side="right")
         self._sync_result_selection()
+        if self.result_frame.winfo_ismapped():
+            self._focus_result_widget()
 
     def _on_result_selection_escape(self, _event) -> str | None:
         if not self._selecting_results or not self.result_frame.winfo_ismapped():
@@ -300,12 +307,24 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
                 tree.item(iid, text=mark)
         count = len(self._selected_iids)
         self.selection_count.config(text=f"已选 {count:,} 张")
+        if count:
+            self.selection_actions.pack(
+                side="bottom", fill="x", padx=12, pady=(4, 0), before=self.grid_frame.master,
+            )
+        else:
+            self.selection_actions.pack_forget()
+        if self._selecting_results and not count:
+            self.btn_leave_selection.pack(side="right", padx=(0, 4))
+        else:
+            self.btn_leave_selection.pack_forget()
+        self.btn_batch_tag.config(state="normal" if count else "disabled", fg=TEXT if count else TEXT_FAINT)
         self.btn_select_page.config(
             text="取消本页选择" if page and len(selection) == len(page) else "全选本页",
             state="normal" if page else "disabled",
         )
         self._update_ai_button()
         self._update_pick_button()
+        self.gallery.show_selection(self._focus_iid, self._selected_iids)
 
     def _on_delete_key(self, _event=None) -> str:
         self.remove_selected_photos()
@@ -383,50 +402,153 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
     # ------------------------------------------------------------------ #
 
     def refresh_library(self) -> None:
-        self.library_tree.delete(*self.library_tree.get_children())
-        for folder in self.db.list_folders():
+        folders = self.db.list_folders()
+        self._folder_paths = [folder.path for folder in folders]
+        keys = {str(path) for path in self._folder_paths}
+        self.checked_folders.intersection_update(keys)
+        if self._browse_folder not in keys:
+            self._browse_folder = None
+        tree = self.library_tree
+        removed = set(tree.get_children()) - keys
+        if removed:
+            tree.delete(*removed)
+        for folder in folders:
             key = str(folder.path)
-            mark = "☑" if key in self.checked_folders else "☐"
-            count = f"{folder.photo_count:,}"
-            scan_note = f" · 扫描于 {folder.last_scanned_at}" if folder.last_scanned_at else ""
-            self.library_tree.insert("", "end", iid=key, text=f"{mark}  {folder.path}", values=(f"{count} 张{scan_note}",))
-
-    def _on_library_click(self, event) -> None:
-        iid = self.library_tree.identify_row(event.y)
-        if not iid:
-            return
-        if str(iid) in self.checked_folders:
-            self.checked_folders.discard(str(iid))
+            name = self._folder_label(folder.path)
+            if tree.exists(key):
+                tree.item(key, text=name)
+            else:
+                tree.insert("", "end", iid=key, text=name)
+        tree.set_children("", *(str(path) for path in self._folder_paths))
+        tree.configure(height=max(1, min(7, len(folders))))
+        if len(folders) > 7:
+            self.library_scroll.pack(side="right", fill="y", before=tree)
         else:
-            self.checked_folders.add(str(iid))
-        self.refresh_library()
-        # 点击同时选中该行：这样「移除」按钮知道要移除哪一个（之前只切换勾选状态）
-        if iid in self.library_tree.get_children():
-            self.library_tree.selection_set(iid)
-            self.library_tree.focus(iid)
+            self.library_scroll.pack_forget()
+        self._sync_library_selection()
+        self._update_scan_controls()
+
+    def _folder_label(self, path: Path) -> str:
+        name = path.name or str(path)
+        if sum(other.name == path.name for other in self._folder_paths) > 1:
+            return f"{name} · {path.parent}"
+        return name
+
+    def _on_library_select(self, _event=None) -> None:
+        selected = self.library_tree.selection()
+        if selected:
+            self.browse_folder(selected[0])
+
+    def _sync_library_selection(self) -> None:
+        selection = (self._browse_folder,) if self._browse_folder is not None else ()
+        if self.library_tree.selection() != selection:
+            self.library_tree.selection_set(selection)
+        self.library_tree.focus(self._browse_folder or "")
+        self.btn_library_all.config(bg=INPUT_BG if self._browse_folder else ACCENT_DIM)
+        self.library_menu.entryconfigure(
+            "从库中移除当前文件夹…", state="normal" if self._browse_folder else "disabled",
+        )
+
+    def browse_folder(self, folder: str | None) -> None:
+        if folder == self._browse_folder:
+            return
+        self._browse_folder = folder
+        self._sync_library_selection()
+        self._result_page = 0
+        if self._selecting_results:
+            self.cancel_result_selection()
         self.refresh_results()
 
+    def _scan_paths(self, folders: list[Path]) -> list[Path]:
+        return [path for path in folders if not self.checked_folders or str(path) in self.checked_folders]
+
+    def _update_scan_controls(self, busy: str = "") -> None:
+        has_folders = bool(self._folder_paths)
+        scope = self._scan_paths(self._folder_paths)
+        if self.checked_folders:
+            label = self._folder_label(scope[0]) if len(scope) == 1 else f"{len(scope)} 个文件夹"
+        else:
+            label = "全部文件夹"
+        if len(label) > 28:
+            label = label[:27] + "…"
+        self.scan_scope_label.config(text=f"扫描范围 · {label}" if has_folders else "")
+        self.btn_scan.config(
+            text=busy or ("扫描新文件" if has_folders else "添加文件夹"),
+            command=self.start_scan if has_folders else self.add_folder_dialog,
+            state="disabled" if busy else "normal",
+            bg=INPUT_BG if busy else ACCENT, fg=TEXT_FAINT if busy else "#ffffff",
+        )
+        for widget in (self.btn_add, self.library_menu_button):
+            widget.config(state="disabled" if busy else "normal")
+        for entry in ("扫描范围…", "全量重扫…", "质量分析…"):
+            enabled = has_folders and (entry != "质量分析…" or PILLOW_AVAILABLE)
+            self.library_menu.entryconfigure(entry, state="normal" if enabled else "disabled")
+
+    def choose_scan_folders(self) -> None:
+        paths = self._folder_paths
+        if not paths:
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("扫描范围")
+        dialog.transient(self.root)
+        dialog.configure(bg=PANEL_BG)
+        tk.Label(
+            dialog, text="选择扫描和质量分析要处理的文件夹", bg=PANEL_BG, fg=TEXT, font=self._font(),
+        ).pack(anchor="w", padx=16, pady=(14, 8))
+        body = tk.Frame(dialog, bg=PANEL_BG)
+        body.pack(fill="both", expand=True, padx=16)
+        choices = tk.Listbox(
+            body, selectmode="multiple", exportselection=False, width=62, height=min(len(paths), 12),
+            bg=CARD_BG, fg=TEXT, selectbackground=ACCENT_DIM, font=self._font(10), activestyle="none",
+        )
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=choices.yview)
+        choices.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        choices.pack(side="left", fill="both", expand=True)
+        for index, path in enumerate(paths):
+            choices.insert("end", str(path))
+            if not self.checked_folders or str(path) in self.checked_folders:
+                choices.selection_set(index)
+
+        def apply_scope() -> None:
+            selected = choices.curselection()
+            if not selected:
+                return
+            self.checked_folders = {str(paths[index]) for index in selected} if len(selected) < len(paths) else set()
+            self._update_scan_controls()
+            dialog.destroy()
+
+        footer = tk.Frame(dialog, bg=PANEL_BG)
+        footer.pack(fill="x", padx=16, pady=12)
+        self._button(footer, "全选", lambda: choices.selection_set(0, "end")).pack(side="left")
+        self._button(footer, "应用", apply_scope, primary=True).pack(side="right")
+        self._button(footer, "取消", dialog.destroy).pack(side="right", padx=(0, 6))
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.grab_set()
+        choices.focus_set()
+
     def add_folder_dialog(self) -> None:
-        chosen = filedialog.askdirectory(title="选择要加入文件夹库的文件夹", initialdir=self.folder_var.get() or str(PROJECT_ROOT))
+        chosen = filedialog.askdirectory(
+            title="选择要加入文件夹库的文件夹", initialdir=self._browse_folder or str(PROJECT_ROOT),
+        )
         if not chosen:
             return
         self.db.add_folder(chosen)
-        self.checked_folders.add(str(Path(chosen).resolve()))
-        self.folder_var.set(str(Path(chosen).resolve()))
+        self._browse_folder = str(Path(chosen).resolve())
+        self._result_page = 0
+        if self._selecting_results:
+            self.cancel_result_selection()
+        self._quality_revision += 1
         self.refresh_library()
         self.refresh_tags()
         self.refresh_results()
         self.refresh_status_bar()
 
     def remove_selected_folder(self) -> None:
-        selection = self.library_tree.selection()
-        if not selection:
-            focused = self.library_tree.focus()
-            selection = (focused,) if focused else ()
-        if not selection:
+        folder = self._browse_folder
+        if folder is None:
             messagebox.showinfo("移除文件夹", "请先在文件夹库中点击选择一个文件夹。")
             return
-        folder = selection[0]
         if not messagebox.askyesno(
             "移除文件夹",
             "只从文件夹库移除该条目，不删除照片记录，更不会删除原片。\n\n继续移除？\n" + folder,
@@ -434,6 +556,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             return
         self.db.remove_folder(folder)
         self.checked_folders.discard(folder)
+        self._result_page = 0
+        self._quality_revision += 1
         self.refresh_library()
         self.refresh_tags()
         self.refresh_results()
@@ -444,7 +568,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
     # ------------------------------------------------------------------ #
 
     def refresh_results(self, *, skip_duplicate_rebuild: bool = False) -> None:
-        folders = sorted(self.checked_folders) or [f.path for f in self.db.list_folders()]
+        folders = [self._browse_folder] if self._browse_folder else [f.path for f in self.db.list_folders()]
         photos = self.db.find_photos_under(folders)
         previous_infos = self.infos_by_iid
         previous_rules = self._rule_cache
@@ -464,6 +588,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             )
 
         selected_filters = self._filter_selection()
+        picked = self.tag_controller.get_by_name(PICK_TAG_NAME)
         self._matched_iids = []
         for info in photos:
             iid = str(info.path)
@@ -473,13 +598,20 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self._rule_cache[iid] = matches
             quality_flags = self._quality_flags_for(info)
             user_tags = self.tag_controller.tags_by_path.get(iid, [])
+            if not self._passes_quick_filter(quality_flags, user_tags, picked):
+                continue
             if not self._passes_filter(info, matches, quality_flags, user_tags, selected_filters):
                 continue
             self.matches_by_iid[iid] = matches
             self.quality_by_iid[iid] = quality_flags
             self._matched_iids.append(iid)
         self._selected_iids.intersection_update(self.matches_by_iid)
-        self._catalog_total = self.db.count_photos()
+        if self._focus_iid not in self.matches_by_iid:
+            self._focus_iid = ""
+        if self._selection_anchor not in self.matches_by_iid:
+            self._selection_anchor = ""
+        if self._quick_filter == "duplicates":
+            self._matched_iids.sort(key=lambda iid: self.duplicates.by_path[iid].group_id)
         self._result_page = min(self._result_page, self._page_count() - 1)
         self._render_result_page()
         self._update_sort_button()
@@ -487,12 +619,33 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             keep = self.infos_by_iid.get(str(self.current.path))
             self.set_detail(keep if keep is not None and str(keep.path) in self.matches_by_iid else None)
 
+    def _passes_quick_filter(
+        self, flags: list[QualityFlag], tags: list[Tag], picked: Tag | None,
+    ) -> bool:
+        if self._quick_filter == "picked":
+            return picked is not None and any(tag.id == picked.id for tag in tags)
+        if self._quick_filter == "issues":
+            return any(flag.flag_id != "duplicate" for flag in flags)
+        if self._quick_filter == "duplicates":
+            return any(flag.flag_id == "duplicate" for flag in flags)
+        return True
+
+    def set_quick_filter(self, key: str) -> None:
+        if key != self._quick_filter:
+            self._quick_filter = key
+            self._result_page = 0
+            self.refresh_results()
+
     def _page_count(self) -> int:
         return max(1, (len(self._matched_iids) + RESULT_PAGE_SIZE - 1) // RESULT_PAGE_SIZE)
 
     def change_result_page(self, step: int) -> None:
-        self._result_page = max(0, min(self._result_page + step, self._page_count() - 1))
+        page = max(0, min(self._result_page + step, self._page_count() - 1))
+        if page == self._result_page:
+            return
+        self._result_page = page
         self._selection_anchor = ""
+        self.set_detail(None)
         self._render_result_page()
         self.result_tree.yview_moveto(0)
 
@@ -504,6 +657,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if removed:
             self.result_tree.delete(*removed)
         existing = set(previous).difference(removed)
+        gallery_photos = []
+        picked_tag = self.tag_controller.get_by_name(PICK_TAG_NAME)
         for iid in page:
             info = self.infos_by_iid[iid]
             matches = self.matches_by_iid[iid]
@@ -522,6 +677,14 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             quality_text = " · ".join(
                 _QUALITY_SHORT.get(flag.flag_id, flag.label) for flag in quality_flags
             )
+            status = quality_text.split(" · ", 1)[0]
+            if self._quick_filter == "duplicates":
+                status = f"重复组 {self.duplicates.by_path[iid].group_id}"
+            if info.exif_status == EXIF_ERROR:
+                status = status or "读取失败"
+            gallery_photos.append(GalleryPhoto(
+                info, picked_tag is not None and any(tag.id == picked_tag.id for tag in user_tags), status,
+            ))
             if not quality_text:
                 if measurement is None:
                     quality_text = ""
@@ -556,9 +719,21 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
                 self.result_tree.insert("", "end", iid=iid, values=values, tags=tags)
         if tuple(page) != self.result_tree.get_children():
             self.result_tree.set_children("", *page)
+        if not self._folder_paths:
+            empty = "添加文件夹，开始整理照片"
+        elif self._quick_filter in ("issues", "duplicates") and not self.measurements_by_path:
+            empty = "从「更多 → 质量分析」分析照片后，可以在这里复核结果。"
+        elif self._quick_filter != "all" or not self._filter_selection().is_empty:
+            empty = "没有符合当前筛选条件的照片"
+        elif self._browse_folder and self.checked_folders and self._browse_folder not in self.checked_folders:
+            empty = "这个文件夹还没有照片。可在「更多 → 扫描范围」中将它加入扫描。"
+        else:
+            empty = "这里还没有照片。点击「扫描新文件」读取照片。"
+        self.gallery.show_photos(gallery_photos, empty)
         if self._selecting_results:
             self._sync_result_selection()
         else:
+            self.gallery.show_selection(self._focus_iid, set())
             self._update_pick_button()
         self._update_page_controls()
 
@@ -566,23 +741,21 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         pages = self._page_count()
         self.btn_result_prev.config(state="normal" if self._result_page else "disabled")
         self.btn_result_next.config(state="normal" if self._result_page + 1 < pages else "disabled")
-        self.page_status.config(text=f"第 {self._result_page + 1} / {pages} 页")
+        for button in (self.btn_result_prev, self.btn_result_next):
+            if pages == 1:
+                button.pack_forget()
+        if pages > 1 and not self.btn_result_prev.winfo_manager():
+            self.btn_result_prev.pack(side="left", before=self.page_status)
+            self.btn_result_next.pack(side="left", padx=(5, 10), before=self.page_status)
+        self.page_status.config(text=f"第 {self._result_page + 1} / {pages} 页" if pages > 1 else "")
         self.btn_select_results.config(state="normal" if self._matched_iids else "disabled")
-        filter_note = ""
-        if (
-            self.active_rules
-            or self.active_quality
-            or self.active_tags
-            or self.gps_only.get()
-            or self.quality_ok_var.get()
-            or self.person_filter.get()
-            or self.sky_filter.get()
-        ):
-            filter_note = " · 已筛选"
-        sort_note = " · 按清晰度排序" if self.sort_mode == SORT_SHARPNESS else ""
-        self.count_label.config(
-            text=f"库中共 {self._catalog_total:,} 个文件 · 符合 {len(self._matched_iids):,} 张{filter_note}{sort_note}"
-        )
+        title = self._folder_label(Path(self._browse_folder)) if self._browse_folder else "全部照片"
+        self.gallery_title.config(text=title if len(title) <= 22 else title[:21] + "…")
+        self.count_label.config(text=f"{len(self._matched_iids):,} 张")
+        self._update_shortcut_hint()
+        for key, button in self.quick_filter_buttons.items():
+            button.config(bg=ACCENT_DIM if key == self._quick_filter else INPUT_BG)
+        self._show_active_filters()
 
     def _selected_all_picked(self, infos: list[PhotoInfo] | None = None) -> bool:
         infos = infos if infos is not None else self._selected_infos()
@@ -613,9 +786,9 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self.toggle_picked()
         return "break"
 
-    def toggle_picked(self) -> None:
+    def toggle_picked(self, infos: list[PhotoInfo] | None = None) -> None:
         """把选中照片标记为“精选”；全部已精选时则取消。"""
-        infos = self._selected_infos()
+        infos = self._selected_infos() if infos is None else infos
         if not infos:
             return
         tag = self.tag_controller.get_by_name(PICK_TAG_NAME)
@@ -699,7 +872,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             return
         measurements = list(self.quality_store.iter_measurements())
         self.measurements_by_path = {measurement.path: measurement for measurement in measurements}
-        self.duplicates = DuplicateResult() if skip_duplicates else rebuild_duplicates(self.quality_store, photos)
+        if skip_duplicates:
+            self.duplicates = DuplicateResult()
+        else:
+            if self._browse_folder:
+                photos = self.db.find_photos_under(f.path for f in self.db.list_folders())
+            self.duplicates = rebuild_duplicates(self.quality_store, photos)
         self._quality_cache_revision = self._quality_revision
 
     def _filter_selection(self) -> FilterSelection:
@@ -761,7 +939,60 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         }
         self.refresh_results()
 
+    def toggle_filters(self) -> None:
+        if self.filter_panel.winfo_manager():
+            self.filter_panel.pack_forget()
+            self.left_canvas.yview_moveto(0)
+            self.btn_filters.config(text="筛选")
+        else:
+            self.filter_panel.pack(fill="x", pady=(0, 10))
+            self.btn_filters.config(text="收起筛选")
+
+    def _show_active_filters(self) -> None:
+        filters = [
+            (label, lambda var=var: self._clear_filter_var(var))
+            for label, var in (
+                *((label, self.rule_vars[key]) for key, label, _en, _fn in RULE_REGISTRY),
+                *((FLAG_LABELS[key], var) for key, var in self.quality_vars.items()),
+                ("有 GPS", self.gps_only),
+                ("质量正常", self.quality_ok_var),
+                ("AI 人物", self.person_filter),
+                ("AI 天空", self.sky_filter),
+            )
+            if var.get()
+        ]
+        for tag_id in sorted(self.active_tags):
+            tag = self.tag_controller.tags_by_id.get(tag_id)
+            if tag:
+                filters.append((tag.name, lambda tag_id=tag_id: self._clear_tag_filter(tag_id)))
+        if not filters:
+            self.active_filter_row.pack_forget()
+            return
+        for child in self.filter_chips.winfo_children():
+            child.destroy()
+        self.filter_summary.config(text="同时满足" if self.and_mode.get() else "满足其一")
+        for label, clear in filters[:2]:
+            short_label = label if len(label) <= 12 else label[:11] + "…"
+            self._button(self.filter_chips, f"{short_label} ×", clear).pack(side="left", padx=(0, 4))
+        if len(filters) > 2:
+            self._button(self.filter_chips, f"另 {len(filters) - 2} 项", self._open_filters).pack(side="left")
+        self.active_filter_row.pack(fill="x", padx=14, pady=(0, 5), after=self.gallery_controls)
+
+    def _open_filters(self) -> None:
+        if not self.filter_panel.winfo_manager():
+            self.toggle_filters()
+
+    def _clear_filter_var(self, variable: tk.BooleanVar) -> None:
+        variable.set(False)
+        self._on_filter_changed()
+
+    def _clear_tag_filter(self, tag_id: int) -> None:
+        self.active_tags.discard(tag_id)
+        self._refresh_tag_list()
+        self.refresh_results()
+
     def clear_filters(self) -> None:
+        self._quick_filter = "all"
         for var in self.rule_vars.values():
             var.set(False)
         for var in self.quality_vars.values():
@@ -776,9 +1007,163 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._refresh_tag_list()
         self.refresh_results()
 
-    @staticmethod
-    def _select_target() -> PhotoInfo | None:
-        return None
+    def set_result_view(self, mode: str, *, focus: bool = True) -> None:
+        self._result_view = mode
+        self.grid_frame.pack_forget()
+        self.list_frame.pack_forget()
+        frame = self.grid_frame if mode == "grid" else self.list_frame
+        frame.pack(fill="both", expand=True)
+        for key, button in self.view_buttons.items():
+            button.config(bg=ACCENT_DIM if key == mode else INPUT_BG)
+        if self._focus_iid in self.result_tree.get_children():
+            if mode == "grid":
+                self.gallery.after_idle(self.gallery.see_photo, self._focus_iid)
+            else:
+                self.result_tree.focus(self._focus_iid)
+                self.result_tree.see(self._focus_iid)
+        if focus:
+            self._focus_result_widget()
+        self._update_shortcut_hint()
+
+    def _update_shortcut_hint(self) -> None:
+        hint = ""
+        if self._result_view == "grid" and self._matched_iids:
+            hint = "空格  大图    P  精选" if PILLOW_AVAILABLE else "安装 Pillow 后可查看缩略图"
+        self.status_shortcuts.config(text=hint)
+
+    def _focus_result_widget(self) -> None:
+        widget = self.gallery if self._result_view == "grid" else self.result_tree
+        widget.focus_set()
+
+    def _focus_gallery_photo(self, iid: str) -> None:
+        tree = self.result_tree
+        tree.focus(iid)
+        if not self._selecting_results:
+            if tree.selection() != (iid,):
+                tree.selection_set(iid)
+        if self._result_view == "list":
+            tree.see(iid)
+        self.set_detail(self.infos_by_iid[iid])
+        self._update_pick_button()
+
+    def _on_gallery_click(self, event, *, toggle: bool = False, extend: bool = False) -> str:
+        iid, checkbox = self.gallery.hit(event.x, event.y)
+        if not iid:
+            return "break"
+        self.gallery.focus_set()
+        if not (self._selecting_results or toggle or extend or checkbox):
+            self._focus_gallery_photo(iid)
+            return "break"
+        if not self._selecting_results:
+            previous = self._focus_iid
+            self.start_result_selection()
+            if previous in self.result_tree.get_children():
+                self._selection_anchor = previous
+                if toggle and previous != iid:
+                    self._selected_iids.add(previous)
+        self._select_result_row(iid, extend=extend)
+        # Clicking the last checked tile returns to regular browsing.
+        if checkbox and not self._selected_iids:
+            self.cancel_result_selection()
+        return "break"
+
+    def _on_gallery_double_click(self, event) -> str:
+        iid, checkbox = self.gallery.hit(event.x, event.y)
+        if self._selecting_results or checkbox:
+            return self._on_gallery_click(event)
+        if iid:
+            self._focus_gallery_photo(iid)
+            self.open_gallery_preview()
+        return "break"
+
+    def _on_gallery_menu(self, event) -> None:
+        iid, _checkbox = self.gallery.hit(event.x, event.y)
+        if iid:
+            self._focus_gallery_photo(iid)
+            self._post_result_menu(event, iid)
+
+    def _navigate_gallery(self, row: int, column: int) -> str:
+        page = self.result_tree.get_children()
+        if not page:
+            return "break"
+        if self._focus_iid in page:
+            index = page.index(self._focus_iid) + row * self.gallery.columns + column
+        else:
+            index = 0
+        if index < 0 and self._result_page > 0:
+            self.change_result_page(-1)
+            page = self.result_tree.get_children()
+            index += len(page)
+        elif index >= len(page) and self._result_page + 1 < self._page_count():
+            index -= len(page)
+            self.change_result_page(1)
+            page = self.result_tree.get_children()
+        iid = page[max(0, min(index, len(page) - 1))]
+        self._focus_gallery_photo(iid)
+        self.gallery.see_photo(iid)
+        return "break"
+
+    def open_gallery_preview(self) -> str:
+        page = self.result_tree.get_children()
+        if not page:
+            return "break"
+        if self._focus_iid not in page:
+            self._focus_gallery_photo(page[0])
+        if self._preview_window is not None:
+            self._preview_window.lift()
+            return "break"
+
+        viewer = tk.Toplevel(self.root)
+        self._preview_window = viewer
+        viewer.transient(self.root)
+        viewer.configure(bg=WIN_BG)
+        width = min(self.root.winfo_screenwidth() - 80, 1060)
+        height = min(self.root.winfo_screenheight() - 120, 740)
+        viewer.geometry(f"{width}x{height}")
+        preview = PreviewCanvas(viewer, (width - 20, height - 70))
+        self.large_preview = preview
+        controls = tk.Frame(viewer, bg=WIN_BG)
+        controls.pack(side="bottom", fill="x", padx=12, pady=8)
+        self._button(controls, "上一张", lambda: self._navigate_gallery(0, -1)).pack(side="left", padx=(0, 4))
+        self._button(controls, "下一张", lambda: self._navigate_gallery(0, 1)).pack(side="left")
+        self._button(controls, "关闭", viewer.destroy).pack(side="right")
+        preview.pack(fill="both", expand=True, padx=10)
+        viewer.bind("<Left>", lambda _event: self._navigate_gallery(0, -1))
+        viewer.bind("<Right>", lambda _event: self._navigate_gallery(0, 1))
+        viewer.bind("<p>", lambda _event: self.toggle_picked([self.current] if self.current else []))
+        viewer.bind("<P>", lambda _event: self.toggle_picked([self.current] if self.current else []))
+        viewer.bind("<Escape>", lambda _event: viewer.destroy())
+        viewer.bind("<space>", lambda _event: viewer.destroy())
+        viewer.bind("<Destroy>", self._on_preview_destroy)
+        self._update_gallery_preview(self.current)
+        viewer.focus_set()
+        return "break"
+
+    def _update_gallery_preview(self, info: PhotoInfo | None) -> None:
+        if self._preview_window is not None:
+            self._preview_window.title(info.file_name if info else "照片预览")
+            self.large_preview.show_photo(info)
+
+    def _on_preview_destroy(self, event) -> None:
+        if event.widget == self._preview_window:
+            self._preview_window = None
+            if self.result_frame.winfo_ismapped():
+                self._focus_result_widget()
+
+    def toggle_detail_panel(self) -> None:
+        if self.detail_panel.winfo_manager():
+            self.detail_panel.pack_forget()
+        else:
+            self.detail_panel.pack(side="right", fill="y", before=self.center)
+        self.btn_detail.config(bg=ACCENT_DIM if self.detail_panel.winfo_manager() else INPUT_BG)
+
+    def toggle_detail_parameters(self) -> None:
+        if self.detail_parameters.winfo_manager():
+            self.detail_parameters.pack_forget()
+            self.btn_parameters.config(text="拍摄参数与分析 ▸")
+        else:
+            self.detail_parameters.pack(fill="x", after=self.btn_parameters)
+            self.btn_parameters.config(text="拍摄参数与分析 ▾")
 
     def _on_result_click(self, event, *, toggle: bool = False, extend: bool = False) -> str | None:
         tree = self.result_tree
@@ -833,7 +1218,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if self._selecting_results:
             return
         selection = self.result_tree.selection()
-        if selection:
+        if selection and self.current != self.infos_by_iid[selection[0]]:
             self.set_detail(self.infos_by_iid[selection[0]])
         self._update_pick_button()
 
@@ -881,10 +1266,16 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             return
         if self.analyze_thread and self.analyze_thread.is_alive():
             return
-        folders = [f.path for f in self.db.list_folders() if str(f.path) in self.checked_folders]
+        folders = self._scan_paths([folder.path for folder in self.db.list_folders()])
         if not folders:
-            messagebox.showinfo("开始扫描", "请先在左侧文件夹库勾选至少一个要扫描的文件夹。")
+            messagebox.showinfo("开始扫描", "请先添加一个照片文件夹。")
             return
+        if full:
+            preview = "\n".join(str(path) for path in folders[:8])
+            if len(folders) > 8:
+                preview += f"\n另有 {len(folders) - 8} 个文件夹"
+            if not messagebox.askyesno("全量重扫", f"重新读取以下 {len(folders)} 个文件夹中的照片？\n\n{preview}"):
+                return
 
         self.cancel_event.clear()
         self._set_scanning_ui(True)
@@ -908,18 +1299,11 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self.progress_folder.config(text="")
             self.progress_detail.config(text="")
             self.progress_current.config(text="")
-            self.btn_scan.config(text="扫描中…", state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
-            self.btn_analyze.config(state="disabled", fg=TEXT_FAINT)
-            for btn in (self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
-                btn.config(state="disabled")
+            self._update_scan_controls("扫描中…")
         else:
             self.progress_frame.pack_forget()
             self.result_frame.pack(fill="both", expand=True)
-            self.btn_scan.config(text="开始扫描", state="normal", bg=ACCENT, fg="#ffffff")
-            if PILLOW_AVAILABLE:
-                self.btn_analyze.config(state="normal", fg=TEXT)
-            for btn in (self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
-                btn.config(state="normal")
+            self._update_scan_controls()
 
     def _scan_worker(self, folders, full=False) -> None:  # 在后台线程中运行
         # SQLite 连接不能跨线程使用：工作线程必须自己开一个连接。
@@ -1006,18 +1390,18 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             return
         if self.scan_thread and self.scan_thread.is_alive():
             return
-        folders = [f.path for f in self.db.list_folders() if str(f.path) in self.checked_folders]
+        folders = self._scan_paths([folder.path for folder in self.db.list_folders()])
         if not folders:
-            messagebox.showinfo("质量分析", "请先在左侧文件夹库勾选至少一个要分析的文件夹。")
+            messagebox.showinfo("质量分析", "请先添加一个照片文件夹。")
             return
         infos = self.db.find_photos_under(folders)
         if not infos:
-            messagebox.showinfo("质量分析", "勾选的文件夹里还没有照片记录，请先扫描。")
+            messagebox.showinfo("质量分析", "扫描范围内还没有照片记录，请先扫描。")
             return
 
         if not messagebox.askyesno(
             "质量分析",
-            "将对勾选文件夹中的照片分析图像质量（清晰度 / 曝光 / 重复）。\n\n"
+            f"将分析扫描范围内 {len(folders)} 个文件夹中的 {len(infos):,} 张照片（清晰度 / 曝光 / 重复）。\n\n"
             "· 只读分析，不会改动任何原始文件\n"
             "· 只处理未分析或已变更的照片，可以随时取消\n\n继续？",
         ):
@@ -1045,18 +1429,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self.progress_folder.config(text="只读分析 · 不会改动原始文件")
             self.progress_detail.config(text="")
             self.progress_current.config(text="准备中……")
-            self.btn_analyze.config(text="分析中…", state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
-            self.btn_scan.config(state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
-            for btn in (self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
-                btn.config(state="disabled")
+            self._update_scan_controls("分析中…")
         else:
             self.progress_frame.pack_forget()
             self.result_frame.pack(fill="both", expand=True)
-            self.btn_analyze.config(text="质量分析", state="normal", bg=INPUT_BG, fg=TEXT)
-            self.btn_scan.config(text="开始扫描", state="normal", bg=ACCENT, fg="#ffffff")
+            self._update_scan_controls()
             self.btn_cancel.config(command=self.cancel_scan)
-            for btn in (self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
-                btn.config(state="normal")
 
     def _analyze_worker(self, infos) -> None:  # 在后台线程中运行
         try:

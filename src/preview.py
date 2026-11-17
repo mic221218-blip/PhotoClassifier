@@ -84,7 +84,7 @@ def is_supported(category: str) -> bool:
     return category in (CATEGORY_NEF, CATEGORY_JPEG, CATEGORY_PNG)
 
 
-def load_color_preview(info: PhotoInfo):
+def load_color_preview(info: PhotoInfo, *, draft_size: tuple[int, int] = (560, 560)):
     """Read an oriented RGB preview for visual recognition."""
     ensure_pillow()
     if not is_supported(info.category):
@@ -94,7 +94,7 @@ def load_color_preview(info: PhotoInfo):
         with Image.open(source) as image:
             if image.width * image.height > _MAX_PIXELS:
                 raise PreviewError("图片尺寸过大")
-            image.draft("RGB", (560, 560))
+            image.draft("RGB", draft_size)
             return ImageOps.exif_transpose(image).convert("RGB")
 
     if info.category == CATEGORY_NEF:

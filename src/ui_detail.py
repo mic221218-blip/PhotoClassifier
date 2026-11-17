@@ -5,7 +5,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox
 
-from src.formatting import format_size
+from src.formatting import format_shutter, format_size
 from src.photo_info import EXIF_ERROR, EXIF_NO_EXIF, EXIF_OK, PhotoInfo
 from src.quality import FLAG_LABELS, QualityFlag
 from src.tag_store import Tag
@@ -22,6 +22,7 @@ from src.ui_theme import (
     TEXT,
     TEXT_FAINT,
     TEXT_SUB,
+    f_number,
 )
 
 
@@ -31,6 +32,10 @@ class DetailMixin:
     def set_detail(self, info: PhotoInfo | None) -> None:
         """刷新右侧详情面板。"""
         self.current = info
+        self._focus_iid = str(info.path) if info else ""
+        if hasattr(self, "gallery"):
+            self.gallery.show_selection(self._focus_iid, self._selected_iids)
+        self._update_gallery_preview(info)
         self._fill_ai_detail(info)
         self._draw_preview(info)
         for child in self.rules_frame.winfo_children():
@@ -58,6 +63,7 @@ class DetailMixin:
             self.btn_open.config(state="disabled", command=None)
             self.btn_reveal.config(state="disabled", command=None)
             self.btn_copy.config(state="disabled", command=None)
+            self.btn_current_pick.config(text="标记精选", state="disabled", fg=TEXT_FAINT)
             return
 
         self.detail_name.config(text=info.file_name)
@@ -70,7 +76,19 @@ class DetailMixin:
             self.badge_status.config(text="无 EXIF", fg=TEXT_SUB)
         else:
             self.badge_status.config(text="未解析", fg=TEXT_SUB)
-        self.detail_meta.config(text=f"{format_size(info.size_bytes)} · 修改于 {info.modified_at or '—'}")
+        settings = " · ".join(
+            value for value in (
+                f_number(info.f_number),
+                format_shutter(info.exposure_time_s) if info.exposure_time_s else "",
+                f"ISO {info.iso}" if info.iso is not None else "",
+            ) if value
+        )
+        summary = "\n".join(value for value in (info.camera, settings) if value)
+        self.detail_meta.config(text=summary)
+        picked = self._selected_all_picked([info])
+        self.btn_current_pick.config(
+            text="取消精选" if picked else "标记精选", state="normal", fg=GREEN if picked else TEXT,
+        )
 
         for child in self.detail_rows.winfo_children():
             child.destroy()
@@ -78,6 +96,7 @@ class DetailMixin:
         for label, getter in DETAIL_FIELDS:
             value = getter(info)
             rows.append((label, value))
+        rows.append(("文件大小", format_size(info.size_bytes)))
         if info.exif_status == EXIF_ERROR:
             rows.append(("错误信息", info.exif_error))
         for label, value in rows:

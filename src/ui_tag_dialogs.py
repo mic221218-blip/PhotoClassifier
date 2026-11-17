@@ -103,6 +103,9 @@ class TagDialogsMixin:
         iid = self.result_tree.identify_row(event.y)
         if not iid:
             return
+        self._post_result_menu(event, iid)
+
+    def _post_result_menu(self, event, iid: str) -> None:
         if not self._selecting_results and iid not in self.result_tree.selection():
             self.result_tree.selection_set(iid)
             self.result_tree.focus(iid)
