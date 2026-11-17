@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from src.formatting import format_shutter
+from src.paths import windows_app_data
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DB = PROJECT_ROOT / "data" / "photos.db"
+DATA_DIR = windows_app_data() if getattr(sys, "frozen", False) else PROJECT_ROOT / "data"
+DEFAULT_DB = DATA_DIR / "photos.db"
 ICON_PATH = PROJECT_ROOT / "assets" / "photoclassifier.ico"
 
 WIN_BG = "#1b1c21"

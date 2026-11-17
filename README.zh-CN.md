@@ -13,6 +13,21 @@ PhotoClassifier 的目标是：**扫描并理解照片的信息（EXIF / 文件 
 让摄影师能按"我现在想处理什么"来快速找到照片**，然后把选出的照片交给
 Lightroom 等后期软件。
 
+## Windows 安装
+
+1. 在 Windows 10 或 11（x64）上，从 [GitHub Releases](https://github.com/mic221218-blip/PhotoClassifier/releases/latest) 下载 `PhotoClassifier-Setup-x64.exe`。
+2. 双击安装包，按向导完成安装。安装包已包含 Python 和运行依赖，默认仅为当前 Windows 用户安装。
+3. 从开始菜单打开 **PhotoClassifier**。在左侧加入照片文件夹，再点 **开始扫描**。
+
+安装包尚未签名。如果 Windows 显示 SmartScreen 提示，确认文件来自上述 GitHub Release 后，可以选择 **更多信息 → 仍要运行**。
+
+**升级和图库。** 退出程序后运行新版安装包。图库和标签保存在 `%LOCALAPPDATA%\PhotoClassifier\photos.db`。
+如需迁移源码版的图库，先退出两个版本并备份数据库，再将源码目录下的 `data/photos.db` 复制到该位置。
+可在 Windows **设置 → 应用** 中卸载程序。
+
+**可选 AI。** 人物和天空分析需要另行准备模型文件。按[人物和天空 AI 试用](#人物和天空-ai-试用)中的相对路径，
+把模型放在 `%LOCALAPPDATA%\PhotoClassifier\models` 下。安装包已包含推理运行库。
+
 ## 项目定位
 
 - PhotoClassifier **不是 Lightroom 的替代品**，而是 Lightroom **之前**的照片分析与筛选工具；
@@ -149,7 +164,7 @@ Lightroom 等后期软件。
 - **CLI**：`tags`、`tag add/remove/list/rename/delete`、`filter --tags`；
   `show` 会显示照片的标签。
 
-## 安装与使用
+## 从源码运行
 
 ### 人物和天空 AI 试用
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.ai_analysis import analyze_batch
+from src.paths import model_directories
 from src.photo_info import PhotoInfo
 from src.preview import load_color_preview
 
@@ -41,10 +42,11 @@ class PersonResult:
 
 
 def model_directory() -> Path:
-    for folder in (ROOT / "models", ROOT / ".dsh_work" / "models"):
+    folders = model_directories(ROOT)
+    for folder in folders:
         if all((folder / asset).is_file() for asset in MODEL_PATHS):
             return folder
-    raise RuntimeError("未找到完整的人物分析模型。请将模型放到项目的 models 文件夹。")
+    raise RuntimeError(f"未找到完整的人物分析模型。请按 README 将模型放到 {folders[0]}。")
 
 
 class PersonAnalyzer:

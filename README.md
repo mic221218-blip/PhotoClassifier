@@ -15,6 +15,20 @@ metadata / image analysis in future stages), so photographers can quickly find
 the photos they want to work on** — and then hand them off to Lightroom or other
 post-processing software.
 
+## Install on Windows
+
+1. On Windows 10 or 11 (x64), download `PhotoClassifier-Setup-x64.exe` from [GitHub Releases](https://github.com/mic221218-blip/PhotoClassifier/releases/latest).
+2. Double-click the installer and follow the wizard. It includes Python and the app's runtime dependencies and installs for the current Windows user.
+3. Open **PhotoClassifier** from the Start menu. Add a photo folder, then start a scan.
+
+The installer is unsigned. If Windows SmartScreen prompts you, confirm the file came from the GitHub release linked above, then choose **More info → Run anyway**.
+
+**Updates and library data.** Close the app and run the new installer to update. Your library and tags are stored in `%LOCALAPPDATA%\PhotoClassifier\photos.db`.
+To move a library from a source checkout, close both copies of the app, back up the data, then copy the checkout's `data/photos.db` to that location.
+To uninstall, use **Settings → Apps** in Windows.
+
+**Optional AI.** Person and sky analysis require model files. Place them under `%LOCALAPPDATA%\PhotoClassifier\models` using the paths in the [AI preview section](#person-and-sky-ai-preview). The installer includes the inference runtime.
+
 ## Project Positioning
 
 - PhotoClassifier is **not a Lightroom replacement** — it is the photo analysis
@@ -193,7 +207,7 @@ presented and filtered through the same layer.
 - Launch: the desktop shortcut (pointing at `run_gui.pyw`), or
   `python -m src.gui` / `pythonw run_gui.pyw`.
 
-## Installation & Usage
+## Run from source
 
 ### Person and sky AI preview
 

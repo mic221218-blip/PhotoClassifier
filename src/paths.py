@@ -12,7 +12,20 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+
+
+def windows_app_data() -> Path:
+    """Return the per-user data directory used by the Windows installer."""
+    local = os.environ.get("LOCALAPPDATA")
+    return (Path(local) if local else Path.home() / "AppData" / "Local") / "PhotoClassifier"
+
+
+def model_directories(project_root: Path) -> tuple[Path, ...]:
+    if getattr(sys, "frozen", False):
+        return (windows_app_data() / "models",)
+    return (project_root / "models", project_root / ".dsh_work" / "models")
 
 
 def db_key(path: str | Path) -> str:

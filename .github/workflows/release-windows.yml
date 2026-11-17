@@ -1,0 +1,52 @@
+name: Release Windows installer
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          architecture: x64
+
+      - name: Install build dependencies
+        run: python -m pip install --only-binary=:all: -r requirements-ai.txt PyInstaller==6.22.3
+
+      - name: Bundle the desktop app
+        run: |
+          $pythonLicense = python -c "import sys; from pathlib import Path; print(Path(sys.base_prefix) / 'LICENSE.txt')"
+          python -m PyInstaller --noconfirm --onedir --windowed --name PhotoClassifier `
+            --icon assets/photoclassifier.ico --add-data 'assets/photoclassifier.ico:assets' `
+            --add-data "${pythonLicense}:licenses" `
+            --collect-binaries onnxruntime `
+            --recursive-copy-metadata Pillow --recursive-copy-metadata numpy `
+            --recursive-copy-metadata onnxruntime --recursive-copy-metadata tokenizers `
+            --distpath .dsh_work/release/dist --workpath .dsh_work/release/build `
+            --specpath .dsh_work/release run_gui.pyw
+
+      - name: Build the installer
+        run: |
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $outputDir = Join-Path $PWD '.dsh_work/release'
+          & $compiler "/DAppVersion=$version" "/O$outputDir" tools/windows-installer.iss
+
+      - name: Publish on GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME .dsh_work/release/PhotoClassifier-Setup-x64.exe `
+            --verify-tag --title "PhotoClassifier $env:GITHUB_REF_NAME" `
+            --notes "Download PhotoClassifier-Setup-x64.exe for Windows 10 or 11 (x64). Installation instructions are in the README."

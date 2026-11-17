@@ -6,6 +6,7 @@ from hashlib import file_digest
 from pathlib import Path
 
 from src.ai_analysis import analyze_batch
+from src.paths import model_directories
 from src.photo_info import PhotoInfo
 from src.preview import load_color_preview
 
@@ -24,11 +25,12 @@ class SkyResult:
 
 
 def model_path() -> Path:
-    for folder in (ROOT / "models", ROOT / ".dsh_work" / "models"):
+    folders = model_directories(ROOT)
+    for folder in folders:
         path = folder / MODEL_FILE
         if path.is_file():
             return path
-    raise RuntimeError("未找到天空分析模型。请按 README 将模型放到 models/segformer-b0/model.onnx。")
+    raise RuntimeError(f"未找到天空分析模型。请按 README 将模型放到 {folders[0] / MODEL_FILE}。")
 
 
 class SkyAnalyzer:
