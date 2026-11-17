@@ -23,6 +23,7 @@ class FilterSelection:
     gps_only: bool = False
     #: 只看“质量正常”：没有技术问题（模糊/运动/曝光/黑屏），重复单独判断。
     quality_ok: bool = False
+    ai_person_only: bool = False
 
     @property
     def selected_count(self) -> int:
@@ -31,6 +32,7 @@ class FilterSelection:
             + len(self.quality_ids)
             + len(self.tag_ids)
             + int(self.quality_ok)
+            + int(self.ai_person_only)
         )
 
     @property
@@ -46,6 +48,7 @@ class FilterSelection:
         and_mode: bool | None = None,
         gps_only: bool | None = None,
         quality_ok: bool | None = None,
+        ai_person_only: bool | None = None,
     ) -> "FilterSelection":
         return FilterSelection(
             rule_ids=self.rule_ids if rule_ids is None else frozenset(rule_ids),
@@ -56,6 +59,7 @@ class FilterSelection:
             and_mode=self.and_mode if and_mode is None else bool(and_mode),
             gps_only=self.gps_only if gps_only is None else bool(gps_only),
             quality_ok=self.quality_ok if quality_ok is None else bool(quality_ok),
+            ai_person_only=self.ai_person_only if ai_person_only is None else bool(ai_person_only),
         )
 
 
@@ -66,6 +70,7 @@ def matches(
     quality_hits: Iterable[str],
     tag_hits: Iterable[int],
     selection: FilterSelection,
+    ai_person: bool = False,
 ) -> bool:
     """照片是否满足当前筛选条件。
 
@@ -87,12 +92,16 @@ def matches(
     selected: set[str | int] = set(selection.rule_ids)
     selected.update(selection.quality_ids)
     selected.update(selection.tag_ids)
+    if selection.ai_person_only:
+        selected.add("__ai_person__")
     if not selected:
         return True
 
     hits: set[str | int] = set(rule_hits)
     hits.update(quality_hits)
     hits.update(int(tag_id) for tag_id in tag_hits)
+    if ai_person:
+        hits.add("__ai_person__")
 
     if selection.and_mode:
         return selected.issubset(hits)

@@ -29,9 +29,9 @@ from tkinter import font as tkfont
 
 from src.database import PhotoDatabase
 from src.duplicates import DuplicateResult
-from src.exif_reader import read_photo_info
 from src.filtering import FilterSelection, matches as selection_matches
 from src.formatting import format_shutter, format_size
+from src.person_ai import MODEL_VERSION
 from src.photo_info import EXIF_ERROR, EXIF_NO_EXIF, EXIF_OK, PhotoInfo
 from src.preview import PILLOW_AVAILABLE, is_supported
 from src.quality import (
@@ -49,6 +49,8 @@ from src.tag_controller import TagController
 from src.tag_store import Tag, TagStore
 from src.ui_detail import DetailMixin
 from src.ui_panels import PanelsMixin
+from src.ui_person import PersonAIMixin
+from src.ui_thumbnail import ThumbnailMixin
 from src.ui_tag_dialogs import TagDialogsMixin
 from src.tags import (
     PICK_TAG_NAME,
@@ -57,7 +59,7 @@ from src.tags import (
     chip_colors,
     normalize_tag_name,
 )
-from src.scanner import scan_folder
+from src.scan_catalog import scan_catalog
 from src.shell import open_in_explorer, open_with_default_app
 
 from src.ui_theme import (  # noqa: E402  (主题常量集中管理)
@@ -83,8 +85,9 @@ from src.ui_theme import (  # noqa: E402  (主题常量集中管理)
     category_label,
 )
 
+RESULT_PAGE_SIZE = 250
 
-class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
+class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixin, ThumbnailMixin):
     """主窗口应用。``root`` 由调用方创建，方便测试与自检。"""
 
     def __init__(self, root: tk.Tk, db_path: str | Path = DEFAULT_DB):
@@ -100,6 +103,11 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
         self.infos_by_iid: dict[str, PhotoInfo] = {}
         self.matches_by_iid: dict[str, list[RuleMatch]] = {}
         self.quality_by_iid: dict[str, list[QualityFlag]] = {}
+        self._rule_cache: dict[str, list[RuleMatch]] = {}
+        self._matched_iids: list[str] = []
+        self._selected_iids: set[str] = set()
+        self._result_page = 0
+        self._catalog_total = 0
         self.current: PhotoInfo | None = None
         self.scan_thread: threading.Thread | None = None
         self.cancel_event = threading.Event()
@@ -109,6 +117,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
         self.analyze_cancel = threading.Event()
         self.analyze_queue: queue.Queue = queue.Queue()
         self.analyze_report = None
+        self._init_person_analysis()
 
         self.rule_engine = RuleEngine()
         self.quality_engine = QualityEngine()
@@ -234,11 +243,18 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
     # ------------------------------------------------------------------ #
 
     def _selected_infos(self) -> list[PhotoInfo]:
-        return [
-            self.infos_by_iid[iid]
-            for iid in self.result_tree.selection()
-            if iid in self.infos_by_iid
-        ]
+        self._capture_result_selection()
+        return [self.infos_by_iid[iid] for iid in sorted(self._selected_iids) if iid in self.infos_by_iid]
+
+    def _capture_result_selection(self) -> None:
+        self._selected_iids.difference_update(self.result_tree.get_children())
+        self._selected_iids.update(self.result_tree.selection())
+
+    def clear_result_selection(self) -> None:
+        self._selected_iids.clear()
+        self.result_tree.selection_set(())
+        self._update_pick_button()
+        self._update_page_controls()
 
     def _on_delete_key(self, _event=None) -> str:
         self.remove_selected_photos()
@@ -376,13 +392,18 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
     # 结果列表与详情联动
     # ------------------------------------------------------------------ #
 
-    def refresh_results(self) -> None:
+    def refresh_results(self, *, skip_duplicate_rebuild: bool = False) -> None:
+        self._capture_result_selection()
         folders = sorted(self.checked_folders) or [f.path for f in self.db.list_folders()]
         photos = self.db.find_photos_under(folders)
+        previous_infos = self.infos_by_iid
+        previous_rules = self._rule_cache
         self.infos_by_iid = {str(info.path): info for info in photos}
         self.matches_by_iid = {}
         self.quality_by_iid = {}
-        self._ensure_quality_cache(photos)
+        self._rule_cache = {}
+        self.person_results = self.db.person_results(MODEL_VERSION)
+        self._ensure_quality_cache(photos, skip_duplicates=skip_duplicate_rebuild)
         self._ensure_tag_cache()
         if self.sort_mode == SORT_SHARPNESS:
             photos.sort(
@@ -391,22 +412,59 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
                 )
             )
 
-        self.result_tree.delete(*self.result_tree.get_children())
-        visible = 0
+        selected_filters = self._filter_selection()
+        self._matched_iids = []
         for info in photos:
-            matches = self.rule_engine.evaluate(info)
-            quality_flags = self._quality_flags_for(info)
-            user_tags = self.tag_controller.tags_by_path.get(str(info.path), [])
-            if not self._passes_filter(info, matches, quality_flags, user_tags):
-                continue
             iid = str(info.path)
+            matches = previous_rules.get(iid) if previous_infos.get(iid) == info else None
+            if matches is None:
+                matches = self.rule_engine.evaluate(info)
+            self._rule_cache[iid] = matches
+            quality_flags = self._quality_flags_for(info)
+            user_tags = self.tag_controller.tags_by_path.get(iid, [])
+            if not self._passes_filter(info, matches, quality_flags, user_tags, selected_filters):
+                continue
             self.matches_by_iid[iid] = matches
             self.quality_by_iid[iid] = quality_flags
+            self._matched_iids.append(iid)
+        self._selected_iids.intersection_update(self.matches_by_iid)
+        self._catalog_total = self.db.count_photos()
+        self._result_page = min(self._result_page, self._page_count() - 1)
+        self._render_result_page()
+        self._update_sort_button()
+        if self.current is not None:
+            keep = self.infos_by_iid.get(str(self.current.path))
+            self.set_detail(keep if keep is not None and str(keep.path) in self.matches_by_iid else None)
+
+    def _page_count(self) -> int:
+        return max(1, (len(self._matched_iids) + RESULT_PAGE_SIZE - 1) // RESULT_PAGE_SIZE)
+
+    def change_result_page(self, step: int) -> None:
+        self._capture_result_selection()
+        self._result_page = max(0, min(self._result_page + step, self._page_count() - 1))
+        self._render_result_page()
+        self.result_tree.yview_moveto(0)
+
+    def _render_result_page(self) -> None:
+        start = self._result_page * RESULT_PAGE_SIZE
+        page = self._matched_iids[start:start + RESULT_PAGE_SIZE]
+        previous = self.result_tree.get_children()
+        removed = set(previous).difference(page)
+        if removed:
+            self.result_tree.delete(*removed)
+        existing = set(previous).difference(removed)
+        for iid in page:
+            info = self.infos_by_iid[iid]
+            matches = self.matches_by_iid[iid]
+            quality_flags = self.quality_by_iid[iid]
+            user_tags = self.tag_controller.tags_by_path.get(iid, [])
             shutter = format_shutter(info.exposure_time_s) if info.exposure_time_s else ""
             labels = " · ".join(match.label for match in matches)
             if user_tags:
                 user_text = " · ".join(f"★{tag.name}" for tag in user_tags)
                 labels = f"{user_text} ｜ {labels}" if labels else user_text
+            if self.has_ai_person(info):
+                labels = f"{labels} ｜ AI · 人物" if labels else "AI · 人物"
             measurement = self.measurements_by_path.get(str(info.path))
             quality_text = " · ".join(
                 _QUALITY_SHORT.get(flag.flag_id, flag.label) for flag in quality_flags
@@ -437,10 +495,25 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
                 tags.append("error")
             elif info.category in ("video", "unsupported"):
                 tags.append("dim")
-            self.result_tree.insert("", "end", iid=iid, values=values, tags=tags)
-            visible += 1
+            if iid in existing:
+                if (tuple(map(str, self.result_tree.item(iid, "values"))) != tuple(map(str, values))
+                        or self.result_tree.item(iid, "tags") != tuple(tags)):
+                    self.result_tree.item(iid, values=values, tags=tags)
+            else:
+                self.result_tree.insert("", "end", iid=iid, values=values, tags=tags)
+        if tuple(page) != self.result_tree.get_children():
+            self.result_tree.set_children("", *page)
+        selection = tuple(iid for iid in page if iid in self._selected_iids)
+        if selection != self.result_tree.selection():
+            self.result_tree.selection_set(selection)
+        self._update_pick_button()
+        self._update_page_controls()
 
-        total = self.db.count_photos()
+    def _update_page_controls(self) -> None:
+        pages = self._page_count()
+        self.btn_result_prev.config(state="normal" if self._result_page else "disabled")
+        self.btn_result_next.config(state="normal" if self._result_page + 1 < pages else "disabled")
+        self.page_status.config(text=f"第 {self._result_page + 1} / {pages} 页 · 已选 {len(self._selected_iids):,} 张")
         filter_note = ""
         if (
             self.active_rules
@@ -448,18 +521,13 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
             or self.active_tags
             or self.gps_only.get()
             or self.quality_ok_var.get()
+            or self.person_filter.get()
         ):
             filter_note = " · 已筛选"
         sort_note = " · 按清晰度排序" if self.sort_mode == SORT_SHARPNESS else ""
         self.count_label.config(
-            text=f"库中共 {total:,} 个文件 · 当前显示 {visible:,} 张{filter_note}{sort_note}"
+            text=f"库中共 {self._catalog_total:,} 个文件 · 符合 {len(self._matched_iids):,} 张{filter_note}{sort_note}"
         )
-        self._update_sort_button()
-        self._update_pick_button()
-        if self.current is not None:
-            keep = self.infos_by_iid.get(str(self.current.path))
-            if keep is not None and str(keep.path) in self.matches_by_iid:
-                self.set_detail(keep)
 
     def _selected_all_picked(self, infos: list[PhotoInfo] | None = None) -> bool:
         infos = infos if infos is not None else self._selected_infos()
@@ -511,7 +579,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
             if unknown:
                 message += f"，跳过 {len(unknown)} 个未知路径"
         self._after_tag_change(message)
-        kept = [iid for iid in selected_iids if iid in self.infos_by_iid]
+        kept = [iid for iid in selected_iids if self.result_tree.exists(iid)]
         if kept:
             self.result_tree.selection_set(kept)
             self._on_result_select()
@@ -576,31 +644,31 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
         self._refresh_tag_list()
         self.refresh_results()
 
-    def _ensure_quality_cache(self, photos: list[PhotoInfo]) -> None:
+    def _ensure_quality_cache(self, photos: list[PhotoInfo], *, skip_duplicates: bool = False) -> None:
         """测量值与重复分组只在质量数据变化后重算，避免每次筛选都全量重跑。"""
         if self._quality_cache_revision == self._quality_revision:
             return
         measurements = list(self.quality_store.iter_measurements())
         self.measurements_by_path = {measurement.path: measurement for measurement in measurements}
-        self.duplicates = rebuild_duplicates(self.quality_store, photos)
+        self.duplicates = DuplicateResult() if skip_duplicates else rebuild_duplicates(self.quality_store, photos)
         self._quality_cache_revision = self._quality_revision
 
-    def _passes_filter(
-        self,
-        info: PhotoInfo,
-        matches: list[RuleMatch],
-        quality_flags: list[QualityFlag],
-        user_tags: list[Tag] | None = None,
-    ) -> bool:
-        """规则、质量、用户标签共用同一个筛选器（见 src/filtering.py）。"""
-        selection = FilterSelection(
+    def _filter_selection(self) -> FilterSelection:
+        return FilterSelection(
             rule_ids=frozenset(self.active_rules),
             quality_ids=frozenset(self.active_quality),
             tag_ids=frozenset(self.active_tags),
             and_mode=self.and_mode.get(),
             gps_only=self.gps_only.get(),
             quality_ok=self.quality_ok_var.get(),
+            ai_person_only=self.person_filter.get(),
         )
+
+    def _passes_filter(
+        self, info: PhotoInfo, matches: list[RuleMatch], quality_flags: list[QualityFlag],
+        user_tags: list[Tag] | None = None, selection: FilterSelection | None = None,
+    ) -> bool:
+        selection = selection if selection is not None else self._filter_selection()
         if selection.is_empty:
             return True
         quality_hits = {flag.flag_id for flag in quality_flags}
@@ -613,6 +681,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
             quality_hits=quality_hits,
             tag_hits={tag.id for tag in (user_tags or [])},
             selection=selection,
+            ai_person=self.has_ai_person(info),
         )
 
     def _on_quality_flag_changed(self) -> None:
@@ -648,6 +717,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
             var.set(False)
         self.gps_only.set(False)
         self.quality_ok_var.set(False)
+        self.person_filter.set(False)
         self.active_rules = set()
         self.active_quality = set()
         self.active_tags = set()
@@ -663,6 +733,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
         self.open_selected()
 
     def _on_result_select(self, _event=None) -> None:
+        self._capture_result_selection()
+        self._update_page_controls()
         selection = self.result_tree.selection()
         if not selection:
             self._update_pick_button()
@@ -709,8 +781,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
     # 扫描流程（后台线程 + 队列轮询）
     # ------------------------------------------------------------------ #
 
-    def start_scan(self) -> None:
+    def start_scan(self, *, full: bool = False) -> None:
+        if self.person_thread is not None:
+            return
         if self.scan_thread and self.scan_thread.is_alive():
+            return
+        if self.analyze_thread and self.analyze_thread.is_alive():
             return
         folders = [f.path for f in self.db.list_folders() if str(f.path) in self.checked_folders]
         if not folders:
@@ -720,7 +796,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
         self.cancel_event.clear()
         self._set_scanning_ui(True)
         self.scan_thread = threading.Thread(
-            target=self._scan_worker, args=(folders,), daemon=True
+            target=self._scan_worker, args=(folders, full), daemon=True
         )
         self.scan_thread.start()
         self.root.after(100, self._poll_scan_queue)
@@ -735,44 +811,43 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
             self.progress_frame.pack(fill="both", expand=True)
             self.progress_bar.config(value=0)
             self.progress_title.config(text="正在扫描")
+            self.btn_cancel.config(command=self.cancel_scan)
             self.progress_folder.config(text="")
             self.progress_detail.config(text="")
             self.progress_current.config(text="")
             self.btn_scan.config(text="扫描中…", state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
             self.btn_analyze.config(state="disabled", fg=TEXT_FAINT)
-            for btn in (self.btn_browse, self.btn_add, self.btn_remove):
+            self.btn_person.config(state="disabled")
+            for btn in (self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
                 btn.config(state="disabled")
         else:
             self.progress_frame.pack_forget()
             self.result_frame.pack(fill="both", expand=True)
             self.btn_scan.config(text="开始扫描", state="normal", bg=ACCENT, fg="#ffffff")
+            self.btn_person.config(state="normal")
             if PILLOW_AVAILABLE:
                 self.btn_analyze.config(state="normal", fg=TEXT)
-            for btn in (self.btn_browse, self.btn_add, self.btn_remove):
+            for btn in (self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
                 btn.config(state="normal")
 
-    def _scan_worker(self, folders) -> None:  # 在后台线程中运行
+    def _scan_worker(self, folders, full=False) -> None:  # 在后台线程中运行
         # SQLite 连接不能跨线程使用：工作线程必须自己开一个连接。
         try:
+            written_total = reused_total = 0
             with PhotoDatabase.open(self.db_path) as database:
                 for index, folder in enumerate(folders, start=1):
                     if self.cancel_event.is_set():
                         break
                     self.msg_queue.put(("folder", index, len(folders), folder))
-                    result = scan_folder(folder)
-                    infos: list[PhotoInfo] = []
-                    n = len(result.files)
-                    for done, item in enumerate(result.files, start=1):
-                        if self.cancel_event.is_set():
-                            break
-                        infos.append(read_photo_info(item.path, item.category))
-                        if done % 5 == 0 or done == n:
-                            self.msg_queue.put(("progress", done, n, item.path.name))
-                    if infos:
-                        database.upsert_many(infos)
-                    if not self.cancel_event.is_set():
+                    result, infos, written = scan_catalog(
+                        database, folder, full=full, cancelled=self.cancel_event.is_set,
+                        progress=lambda done, n, name: self.msg_queue.put(("progress", done, n, name)),
+                    )
+                    written_total += written
+                    reused_total += len(infos) - written
+                    if not self.cancel_event.is_set() and not any(issue.path == result.root for issue in result.issues):
                         database.mark_folder_scanned(folder)
-            self.msg_queue.put(("done",))
+            self.msg_queue.put(("done", written_total, reused_total))
         except Exception as exc:  # 任何异常都必须回到 UI，避免进度条永远停在“扫描中”
             self.msg_queue.put(("error", str(exc)))
 
@@ -794,6 +869,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
                     self.progress_detail.config(text=f"{done:,} / {n:,} · {percent:.0f}%")
                     self.progress_current.config(text=f"当前文件：{name}")
                 elif kind == "error":
+                    self.scan_thread = None
                     self._set_scanning_ui(False)
                     self._quality_revision += 1
                     self.refresh_library()
@@ -803,6 +879,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
                     break
                 elif kind == "done":
                     cancelled = self.cancel_event.is_set()
+                    self.scan_thread = None
                     self._set_scanning_ui(False)
                     self._quality_revision += 1
                     self.refresh_library()
@@ -810,10 +887,13 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
                     self.refresh_status_bar()
                     if cancelled:
                         self.status_left.config(text="扫描已取消（已处理的部分已写入数据库）")
+                    else:
+                        _, written, reused = msg
+                        self.status_left.config(text=f"扫描完成 · 读取 {written:,} · 复用 {reused:,}")
                     break
         except queue.Empty:
             pass
-        if self.scan_thread and self.scan_thread.is_alive():
+        if self.scan_thread is not None:
             self.root.after(100, self._poll_scan_queue)
 
     # ------------------------------------------------------------------ #
@@ -821,6 +901,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
     # ------------------------------------------------------------------ #
 
     def start_analysis(self) -> None:
+        if self.person_thread is not None:
+            return
         if not PILLOW_AVAILABLE:
             messagebox.showinfo(
                 "质量分析",
@@ -868,19 +950,23 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
             self.progress_frame.pack(fill="both", expand=True)
             self.progress_bar.config(value=0)
             self.progress_title.config(text="正在分析质量")
+            self.btn_cancel.config(command=self.cancel_analysis)
             self.progress_folder.config(text="只读分析 · 不会改动原始文件")
             self.progress_detail.config(text="")
             self.progress_current.config(text="准备中……")
             self.btn_analyze.config(text="分析中…", state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
             self.btn_scan.config(state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
-            for btn in (self.btn_browse, self.btn_add, self.btn_remove):
+            self.btn_person.config(state="disabled")
+            for btn in (self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
                 btn.config(state="disabled")
         else:
             self.progress_frame.pack_forget()
             self.result_frame.pack(fill="both", expand=True)
             self.btn_analyze.config(text="质量分析", state="normal", bg=INPUT_BG, fg=TEXT)
             self.btn_scan.config(text="开始扫描", state="normal", bg=ACCENT, fg="#ffffff")
-            for btn in (self.btn_browse, self.btn_add, self.btn_remove):
+            self.btn_person.config(state="normal")
+            self.btn_cancel.config(command=self.cancel_scan)
+            for btn in (self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
                 btn.config(state="normal")
 
     def _analyze_worker(self, infos) -> None:  # 在后台线程中运行
@@ -909,23 +995,26 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
                     percent = done * 100.0 / max(total, 1)
                     self.progress_bar.config(value=percent)
                     self.progress_detail.config(text=f"{done:,} / {total:,} · {percent:.0f}%")
-                    self.progress_current.config(text=f"当前文件：{name}")
+                    if not self.analyze_cancel.is_set():
+                        self.progress_current.config(text=f"当前文件：{name}")
                 elif kind == "done":
                     report = msg[1]
+                    self.analyze_thread = None
                     self.analyze_report = report
                     self._set_analyzing_ui(False)
                     self._quality_revision += 1
-                    self.refresh_results()
+                    self.refresh_results(skip_duplicate_rebuild=report.cancelled)
                     self.refresh_status_bar()
                     self.status_left.config(text=_analysis_summary(report))
                     break
                 elif kind == "error":
+                    self.analyze_thread = None
                     self._set_analyzing_ui(False)
                     messagebox.showerror("质量分析失败", msg[1])
                     break
         except queue.Empty:
             pass
-        if self.analyze_thread and self.analyze_thread.is_alive():
+        if self.analyze_thread is not None:
             self.root.after(120, self._poll_analyze_queue)
 
     # ------------------------------------------------------------------ #
@@ -935,6 +1024,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
     def _on_close(self) -> None:
         self.cancel_event.set()
         self.analyze_cancel.set()
+        self.person_cancel.set()
         try:
             self.db.close()
         finally:
@@ -949,6 +1039,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin):
 
 def _analysis_summary(report) -> str:
     """一行状态栏摘要。"""
+    if report.cancelled:
+        return f"质量分析已取消 · 已完成 {report.analyzed_now:,} 张 · 未更新重复统计"
     parts = [f"质量分析完成：本次 {report.analyzed_now:,} 张"]
     counts = report.flag_counts
     parts.append(f"模糊 {counts.get('blurry', 0):,}")
@@ -957,8 +1049,6 @@ def _analysis_summary(report) -> str:
     parts.append(f"重复 {report.duplicate_groups:,} 组")
     if report.sequence_groups:
         parts.append(f"序列 {report.sequence_groups:,} 组")
-    if report.cancelled:
-        parts.append("已取消")
     return " · ".join(parts)
 
 

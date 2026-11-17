@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from src.photo_info import EXIF_STATUSES, PhotoInfo
-from src.paths import resolve_key
+from src.paths import db_key, resolve_key
 from src.tags import PRESET_TAGS, color_for
 
 
@@ -36,6 +36,7 @@ _PHOTO_COLUMNS: tuple[str, ...] = (
     "category",
     "size_bytes",
     "modified_at",
+    "file_mtime_ns",
     "exif_status",
     "exif_error",
     "taken_at",
@@ -72,6 +73,7 @@ CREATE TABLE IF NOT EXISTS photos (
     category          TEXT NOT NULL,
     size_bytes        INTEGER NOT NULL,
     modified_at       TEXT,
+    file_mtime_ns     INTEGER,
     exif_status       TEXT NOT NULL,
     exif_error        TEXT,
     taken_at          TEXT,
@@ -155,10 +157,22 @@ CREATE INDEX IF NOT EXISTS idx_photo_tags_tag ON photo_tags (tag_id);
 CREATE INDEX IF NOT EXISTS idx_photo_tags_path ON photo_tags (path);
 """
 
-_SCHEMA = _SCHEMA + QUALITY_SCHEMA + TAGS_SCHEMA
+PERSON_SCHEMA = """
+CREATE TABLE IF NOT EXISTS photo_person_ai (
+    path            TEXT PRIMARY KEY,
+    model_version   TEXT NOT NULL,
+    file_size       INTEGER NOT NULL,
+    file_mtime      TEXT,
+    file_mtime_ns   INTEGER NOT NULL,
+    detected        INTEGER NOT NULL CHECK (detected IN (0, 1)),
+    crop_margin     REAL
+);
+"""
+
+_SCHEMA = _SCHEMA + QUALITY_SCHEMA + TAGS_SCHEMA + PERSON_SCHEMA
 
 #: 当前 schema 版本（写入 ``PRAGMA user_version``，为后续迁移留钩子）。
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 #: 按 path 去重的写入语句（列清单固定，编译一次即可）。
 _UPSERT_SQL = """
@@ -168,6 +182,7 @@ ON CONFLICT(path) DO UPDATE SET
     category=excluded.category,
     size_bytes=excluded.size_bytes,
     modified_at=excluded.modified_at,
+    file_mtime_ns=excluded.file_mtime_ns,
     exif_status=excluded.exif_status,
     exif_error=excluded.exif_error,
     taken_at=excluded.taken_at,
@@ -222,6 +237,7 @@ def _photo_values(info: PhotoInfo, *, for_insert: bool) -> tuple:
         info.category,
         info.size_bytes,
         info.modified_at,
+        info.file_mtime_ns,
         info.exif_status,
         info.exif_error,
         info.taken_at,
@@ -259,7 +275,24 @@ class PhotoDatabase:
         self._conn.execute("PRAGMA busy_timeout = 5000")
         with self._conn:
             self._conn.executescript(_SCHEMA)
+            self._conn.execute("BEGIN IMMEDIATE")
             current = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            if current < 4:
+                columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(photos)")}
+                if "file_mtime_ns" not in columns:
+                    self._conn.execute("ALTER TABLE photos ADD COLUMN file_mtime_ns INTEGER")
+                self._conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS invalidate_changed_photo_analysis
+                    AFTER UPDATE OF size_bytes, modified_at, file_mtime_ns ON photos
+                    WHEN OLD.size_bytes IS NOT NEW.size_bytes
+                      OR OLD.modified_at IS NOT NEW.modified_at
+                      OR (OLD.file_mtime_ns IS NOT NULL AND NEW.file_mtime_ns IS NOT NULL
+                          AND OLD.file_mtime_ns <> NEW.file_mtime_ns)
+                    BEGIN
+                        DELETE FROM photo_quality WHERE path = NEW.path;
+                        DELETE FROM photo_person_ai WHERE path = NEW.path;
+                    END
+                """)
             if current < 2:
                 # 首次升级到 V3：写入预置标签（只建标签，不关联照片）。
                 # 用 OR IGNORE 保证重复运行安全；用户之后删光标签也不会被重新塞回来。
@@ -413,9 +446,45 @@ class PhotoDatabase:
                 marks = ", ".join("?" for _ in chunk)
                 self._conn.execute(f"DELETE FROM photo_tags WHERE path IN ({marks})", chunk)
                 self._conn.execute(f"DELETE FROM photo_quality WHERE path IN ({marks})", chunk)
+                self._conn.execute(f"DELETE FROM photo_person_ai WHERE path IN ({marks})", chunk)
                 cursor = self._conn.execute(f"DELETE FROM photos WHERE path IN ({marks})", chunk)
                 removed += int(cursor.rowcount or 0)
         return removed
+
+    def person_results(self, version: str) -> dict[str, bool]:
+        """Load current suggestions independently of user tags."""
+        rows = self._conn.execute(
+            "SELECT a.path, a.detected FROM photo_person_ai a JOIN photos p ON a.path = p.path "
+            "WHERE a.model_version = ? AND a.file_size = p.size_bytes AND a.file_mtime IS p.modified_at "
+            "AND (p.file_mtime_ns IS NULL OR a.file_mtime_ns = p.file_mtime_ns)",
+            (version,),
+        )
+        return {row["path"]: bool(row["detected"]) for row in rows}
+
+    def has_person_result(self, info: PhotoInfo, version: str, mtime_ns: int) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM photo_person_ai WHERE path = ? AND model_version = ? "
+            "AND file_size = ? AND file_mtime IS ? AND file_mtime_ns = ?",
+            (db_key(info.path), version, info.size_bytes, info.modified_at, mtime_ns),
+        ).fetchone() is not None
+
+    def save_person_result(
+        self, info: PhotoInfo, version: str, mtime_ns: int, detected: bool, margin: float | None
+    ) -> bool:
+        """Save a result only while the matching photo remains in the catalog."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO photo_person_ai "
+                "(path, model_version, file_size, file_mtime, file_mtime_ns, detected, crop_margin) "
+                "SELECT path, ?, size_bytes, modified_at, ?, ?, ? FROM photos "
+                "WHERE path = ? AND size_bytes = ? AND modified_at IS ? "
+                "AND (file_mtime_ns IS NULL OR file_mtime_ns = ?) "
+                "ON CONFLICT(path) DO UPDATE SET model_version = excluded.model_version, "
+                "file_size = excluded.file_size, file_mtime = excluded.file_mtime, "
+                "file_mtime_ns = excluded.file_mtime_ns, detected = excluded.detected, crop_margin = excluded.crop_margin",
+                (version, mtime_ns, detected, margin, db_key(info.path), info.size_bytes, info.modified_at, mtime_ns),
+            )
+        return cursor.rowcount == 1
 
     def mark_folder_scanned(self, path: str | Path) -> None:
         """确保文件夹在库中，并更新其最近扫描时间。"""
@@ -456,23 +525,26 @@ class PhotoDatabase:
         return int(row["n"])
 
     def find_photos_under(
-        self, folders: Iterable[str | Path], *, limit: int = 20000
+        self, folders: Iterable[str | Path], *, limit: int | None = None
     ) -> list[PhotoInfo]:
         """返回给定文件夹集合（含子文件夹）下的照片记录，按路径排序。"""
         clauses = []
-        params: list[str] = []
+        params: list[str | int] = []
         for folder in folders:
             clauses.append("path LIKE ? ESCAPE '\\'")
             params.append(_like_prefix(folder))
         if not clauses:
             return []
-        params.append(max(1, int(limit)))
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = "LIMIT ?"
+            params.append(max(1, int(limit)))
         cursor = self._conn.execute(
             f"""
             SELECT {', '.join(_PHOTO_COLUMNS)} FROM photos
             WHERE {' OR '.join(clauses)}
             ORDER BY path
-            LIMIT ?
+            {limit_sql}
             """,
             params,
         )
@@ -495,7 +567,7 @@ def _like_prefix(folder: str | Path) -> str:
     注意：路径分隔符本身也要转义（\\\\ 表示字面量 \\），
     末尾接未转义的 % 作为通配符。
     """
-    return _escape_like(resolve_key(folder)) + "\\\\%"
+    return _escape_like(resolve_key(folder).rstrip("\\/")) + "\\\\%"
 
 
 def _row_to_photo_info(row: sqlite3.Row) -> PhotoInfo:
@@ -505,6 +577,7 @@ def _row_to_photo_info(row: sqlite3.Row) -> PhotoInfo:
         category=row["category"],
         size_bytes=row["size_bytes"],
         modified_at=row["modified_at"],
+        file_mtime_ns=row["file_mtime_ns"],
         exif_status=row["exif_status"],
         exif_error=row["exif_error"],
         taken_at=row["taken_at"],

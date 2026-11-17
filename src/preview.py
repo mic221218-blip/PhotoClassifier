@@ -84,6 +84,28 @@ def is_supported(category: str) -> bool:
     return category in (CATEGORY_NEF, CATEGORY_JPEG, CATEGORY_PNG)
 
 
+def load_color_preview(info: PhotoInfo):
+    """Read an oriented RGB preview for visual recognition."""
+    ensure_pillow()
+    if not is_supported(info.category):
+        raise PreviewError("此文件格式不支持图像识别")
+
+    def decode(source):
+        with Image.open(source) as image:
+            if image.width * image.height > _MAX_PIXELS:
+                raise PreviewError("图片尺寸过大")
+            image.draft("RGB", (560, 560))
+            return ImageOps.exif_transpose(image).convert("RGB")
+
+    if info.category == CATEGORY_NEF:
+        blob, reason = _extract_embedded_preview(info.path)
+        if blob is None:
+            raise PreviewError(reason or "未找到内嵌预览")
+        return decode(io.BytesIO(blob))
+    with info.path.open("rb") as source:
+        return decode(source)
+
+
 def load_preview(info: PhotoInfo, config: QualityConfig | None = None) -> Preview:
     """读取一张照片的预览并归一化成灰度图。
 

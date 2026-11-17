@@ -74,6 +74,7 @@ class PhotoInfo:
     gps_longitude: float | None = None  # GPS 经度（十进制度）
     width_px: int | None = None  # 图片宽度（像素）
     height_px: int | None = None  # 图片高度（像素）
+    file_mtime_ns: int | None = None
 
     @property
     def file_name(self) -> str:

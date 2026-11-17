@@ -565,4 +565,5 @@ def read_photo_info(path: str | Path, category: str) -> PhotoInfo:
         gps_longitude=fields.get("gps_longitude"),
         width_px=fields.get("width_px"),
         height_px=fields.get("height_px"),
+        file_mtime_ns=stat.st_mtime_ns,
     )

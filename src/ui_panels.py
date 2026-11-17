@@ -21,7 +21,6 @@ from src.ui_theme import (
     INPUT_BG,
     ORANGE,
     PANEL_BG,
-    PREVIEW_COLORS,
     PROJECT_ROOT,
     QUALITY_SHORT,
     RESULT_COLUMNS,
@@ -61,10 +60,14 @@ class PanelsMixin:
         self.btn_browse.pack(side="left", padx=(0, 10))
         self.btn_scan = self._button(bar, "开始扫描", self.start_scan, primary=True)
         self.btn_scan.pack(side="left", padx=(0, 8))
+        self.btn_rescan = self._button(bar, "全量重扫", lambda: self.start_scan(full=True))
+        self.btn_rescan.pack(side="left", padx=(0, 8))
         self.btn_analyze = self._button(bar, "质量分析", self.start_analysis)
         self.btn_analyze.pack(side="left", padx=(0, 12))
         if not PILLOW_AVAILABLE:
             self.btn_analyze.config(state="disabled", fg=TEXT_FAINT)
+        self.btn_person = self._button(bar, "人物 AI", self.start_person_analysis)
+        self.btn_person.pack(side="left", padx=(0, 12))
         tk.Label(
             bar, text="只读扫描 · 不会改动原始文件", bg=WIN_BG, fg=TEXT_FAINT, font=self._font(9)
         ).pack(side="left", padx=(0, 16))
@@ -233,6 +236,12 @@ class PanelsMixin:
         self.btn_manage_tags = self._button(panel, "管理标签…", self.open_tag_manager)
         self.btn_manage_tags.pack(fill="x", padx=16, pady=(6, 2), ipady=1)
 
+        tk.Checkbutton(
+            panel, text="AI 建议 · 人物", variable=self.person_filter, command=self.refresh_results,
+            bg=PANEL_BG, fg=TEXT, activebackground=PANEL_BG, activeforeground=TEXT,
+            selectcolor=INPUT_BG, font=self._font(9),
+        ).pack(anchor="w", padx=16, pady=(6, 0))
+
         logic_row = tk.Frame(panel, bg=PANEL_BG)
         logic_row.pack(fill="x", padx=16, pady=(8, 0))
         tk.Label(logic_row, text="条件组合", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9)).pack(anchor="w")
@@ -310,6 +319,15 @@ class PanelsMixin:
         # 结果列表
         self.result_frame = tk.Frame(center, bg=WIN_BG)
         self.result_frame.pack(fill="both", expand=True)
+        pages = tk.Frame(self.result_frame, bg=WIN_BG)
+        pages.pack(side="bottom", fill="x", padx=8, pady=4)
+        self.btn_result_prev = self._button(pages, "上一页", lambda: self.change_result_page(-1))
+        self.btn_result_prev.pack(side="left")
+        self.btn_result_next = self._button(pages, "下一页", lambda: self.change_result_page(1))
+        self.btn_result_next.pack(side="left", padx=(5, 10))
+        self.page_status = tk.Label(pages, bg=WIN_BG, fg=TEXT_SUB, font=self._font(9))
+        self.page_status.pack(side="left")
+        self._button(pages, "清除选择", self.clear_result_selection).pack(side="right")
         cols = [key for key, *_ in RESULT_COLUMNS]
         self.result_tree = ttk.Treeview(self.result_frame, columns=cols, show="headings")
         for key, title, width, anchor in RESULT_COLUMNS:
@@ -382,6 +400,7 @@ class PanelsMixin:
 
         self.preview_canvas = tk.Canvas(content, bg=CARD_BG, height=112, highlightthickness=0)
         self.preview_canvas.pack(fill="x", padx=14, pady=(14, 0))
+        self._init_thumbnail()
 
         name_row = tk.Frame(content, bg=PANEL_BG)
         name_row.pack(fill="x", padx=18, pady=(10, 0))
@@ -394,6 +413,7 @@ class PanelsMixin:
 
         self.detail_meta = tk.Label(content, text="", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(8))
         self.detail_meta.pack(fill="x", padx=18, pady=(4, 8))
+        self.person_detail = tk.Label(content, text="", bg=PANEL_BG, anchor="w", font=self._font(9, bold=True))
         tk.Frame(content, bg=BORDER_SOFT, height=1).pack(fill="x", padx=18)
 
         self.detail_rows = tk.Frame(content, bg=PANEL_BG)
@@ -450,21 +470,6 @@ class PanelsMixin:
         self.rules_frame.pack(fill="x", padx=18, pady=(0, 14))
 
         self.set_detail(None)
-
-    def _draw_preview(self, info: PhotoInfo | None) -> None:
-        canvas = self.preview_canvas
-        canvas.delete("all")
-        width = max(canvas.winfo_width(), 100)
-        height = int(canvas["height"])
-        top, bottom = PREVIEW_COLORS.get(info.category if info else None, ((40, 41, 48), (64, 66, 76)))
-        for y in range(height):
-            t = y / max(height - 1, 1)
-            color = "#%02x%02x%02x" % tuple(round(a * (1 - t) + b * t) for a, b in zip(top, bottom))
-            canvas.create_line(0, y, width, y, fill=color)
-        label = info.category.upper() if info else "—"
-        canvas.create_text(
-            width / 2, height / 2, text=label, fill="#c9cbd6", font=("Consolas", 18, "bold")
-        )
 
     def _build_status_bar(self) -> None:
         bar = tk.Frame(self.root, bg=PANEL_BG, height=40)

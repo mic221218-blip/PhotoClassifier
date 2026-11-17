@@ -104,6 +104,7 @@ class TagDialogsMixin:
         if not iid:
             return
         if iid not in self.result_tree.selection():
+            self.clear_result_selection()
             self.result_tree.selection_set(iid)
         count = len(self._selected_infos())
         menu = tk.Menu(self.root, tearoff=0, bg=CARD_BG, fg=TEXT, activebackground=ACCENT_DIM)

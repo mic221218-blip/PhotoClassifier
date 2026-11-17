@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +62,141 @@ def seeded_app(root, db_path: Path):
     app.refresh_library()
     app.refresh_results()
     return app
+
+
+def test_person_analysis_filters_and_persists_selected_photos(root, db_path, tmp_path, monkeypatch) -> None:
+    import src.ui_person as person_ui
+    from src.database import PhotoDatabase
+    from src.exif_reader import read_photo_info
+    from src.person_ai import MODEL_VERSION, PersonResult
+
+    library = tmp_path / "library"
+    library.mkdir()
+    files = [library / name for name in ("person.jpg", "landscape.jpg", "unselected.jpg")]
+    for path in files:
+        path.write_bytes(b"fixture")
+    paths = [str(path.resolve()) for path in files]
+    infos = [read_photo_info(path, "jpeg") for path in files]
+    real_batch = person_ui.analyze_selection
+    seen = []
+
+    class Detector:
+        def analyze(self, info):
+            seen.append(info.file_name)
+            return PersonResult(info.file_name == "person.jpg", 0.1)
+
+    monkeypatch.setattr(person_ui, "analyze_selection",
+                        lambda *args, **kwargs: real_batch(*args, **kwargs, make_analyzer=Detector))
+    app = PhotoClassifierApp(root, db_path)
+    try:
+        app.db.add_folder(library)
+        app.db.upsert_many(infos)
+        app.refresh_results()
+        app.result_tree.selection_set(paths[:2])
+        app.start_person_analysis()
+        deadline = time.monotonic() + 5
+        while app.person_thread is not None and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        assert app.person_thread is None
+        assert set(seen) == {"person.jpg", "landscape.jpg"}
+        assert app.person_results == {paths[0]: True, paths[1]: False}
+        assert "AI · 人物" in app.result_tree.item(paths[0], "values")[6]
+        app.person_filter.set(True)
+        app.refresh_results()
+        assert app.result_tree.get_children() == (paths[0],)
+        app.clear_filters()
+        assert set(app.result_tree.get_children()) == set(paths)
+        with PhotoDatabase.open(db_path) as reopened:
+            assert reopened.person_results(MODEL_VERSION) == app.person_results
+            reopened.remove_photos([files[0]])
+            reopened.upsert_photo(infos[0])
+            assert paths[0] not in reopened.person_results(MODEL_VERSION)
+        assert all(path.read_bytes() == b"fixture" for path in files)
+    finally:
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
+def test_large_library_filters_before_paging_and_keeps_cross_page_selection(root, db_path, tmp_path):
+    app = PhotoClassifierApp(root, db_path)
+    try:
+        app.db.add_folder(tmp_path)
+        with app.db._conn:
+            app.db._conn.executemany(
+                "INSERT INTO photos (path,file_name,category,size_bytes,exif_status,iso,first_seen_at,last_scanned_at) "
+                "VALUES (?,?, 'jpeg',1,'ok',?,'now','now')",
+                [(str(tmp_path / f"{i:05}.jpg"), f"{i:05}.jpg", 6400 if i == 20009 else 100)
+                 for i in range(20010)],
+            )
+        app.refresh_results()
+        assert len(app._matched_iids) == 20010
+        first = app.result_tree.get_children()[0]
+        app.result_tree.selection_set(first)
+        app.change_result_page(1)
+        second = app.result_tree.get_children()[0]
+        app.result_tree.selection_set(second)
+        assert {str(info.path) for info in app._selected_infos()} == {first, second}
+        app.rule_vars["high_iso"].set(True)
+        app._on_filter_changed()
+        assert app.result_tree.get_children() == (str(tmp_path / "20009.jpg"),)
+        assert app._selected_infos() == []
+    finally:
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
+def test_quality_cancel_button_targets_quality_worker(root, db_path):
+    app = PhotoClassifierApp(root, db_path)
+    try:
+        app._set_analyzing_ui(True)
+        app.btn_cancel.invoke()
+        assert app.analyze_cancel.is_set()
+        assert not app.cancel_event.is_set()
+        app._set_analyzing_ui(False)
+        app._set_scanning_ui(True)
+        app.btn_cancel.invoke()
+        assert app.cancel_event.is_set()
+    finally:
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
+def test_thumbnail_displays_latest_selection(root, db_path, tmp_path, monkeypatch):
+    Image = pytest.importorskip("PIL.Image")
+    import src.ui_thumbnail as thumbnails
+
+    started = threading.Event()
+    release = threading.Event()
+    app = PhotoClassifierApp(root, db_path)
+
+    def load(info):
+        if info.file_name == "old.JPG":
+            started.set()
+            assert release.wait(3)
+            return Image.new("RGB", (4, 3), "red")
+        return Image.new("RGB", (2, 3), "blue")
+
+    monkeypatch.setattr(thumbnails, "_load_thumbnail", load)
+    try:
+        app.set_detail(make_info(tmp_path / "old.JPG", category="jpeg"))
+        assert started.wait(3)
+        app.set_detail(make_info(tmp_path / "new.JPG", category="jpeg"))
+        release.set()
+        deadline = time.monotonic() + 5
+        while app._thumbnail_image is None and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        assert app._thumbnail_image.width() == 2
+        assert len(app._thumbnail_cache) == 2
+    finally:
+        release.set()
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
 
 
 def test_app_lists_library_and_results(root, db_path: Path) -> None:
@@ -140,7 +276,7 @@ def test_scan_worker_runs_in_background_thread(root, db_path: Path, tmp_path: Pa
     messages = []
     while not app.msg_queue.empty():
         messages.append(app.msg_queue.get())
-    assert messages[-1] == ("done",)
+    assert messages[-1] == ("done", 1, 0)
     app.db.close()
 
 

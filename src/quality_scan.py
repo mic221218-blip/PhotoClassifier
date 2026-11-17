@@ -15,13 +15,14 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 from src.duplicates import DuplicateResult, DuplicateFinder, candidates_from
+from src.paths import db_key
 from src.photo_info import PhotoInfo
 from src.preview import PillowMissing, PreviewError, is_supported, load_preview
 from src.quality import (
@@ -35,6 +36,7 @@ from src.quality import (
     dhash_from_grid,
 )
 from src.quality_store import QualityStore
+from src.work_queue import bounded_results
 
 #: 首尾各读多少字节做"快速指纹"（精确重复的第一道筛）。
 _QUICK_HASH_BYTES = 128 * 1024
@@ -105,11 +107,13 @@ def quick_hash(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def full_hash(path: str | Path) -> str:
+def full_hash(path: str | Path, *, cancelled=lambda: False) -> str:
     """整文件 SHA-256（只在快速指纹撞车时计算）。"""
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            if cancelled():
+                raise InterruptedError("Hashing cancelled")
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -220,9 +224,13 @@ def analyze_photos(
     pending = pending_all[: opts.limit] if opts.limit > 0 else pending_all
 
     total = len(pending)
+    cancelled = is_cancelled or (lambda: False)
     if total == 0:
         report.elapsed = time.perf_counter() - started
-        _augment_report(report, store, infos, cfg)
+        report.cancelled = cancelled()
+        if not report.cancelled:
+            _augment_report(report, store, infos, cfg, cancelled=cancelled)
+            report.cancelled = cancelled()
         return report
 
     workers = max(1, min(opts.workers, os.cpu_count() or 4, total))
@@ -231,17 +239,11 @@ def analyze_photos(
 
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(measure_photo, info, cfg): info for info in pending
-            }
             try:
-                for future in as_completed(futures):
-                    if is_cancelled is not None and is_cancelled():
-                        report.cancelled = True
-                        for pending_future in futures:
-                            pending_future.cancel()
-                        break
-                    info = futures[future]
+                def measure(info):
+                    return measure_photo(info, cfg)
+
+                for info, future in bounded_results(pool, pending, measure, limit=workers, cancelled=cancelled):
                     try:
                         measurement = future.result()
                     except PillowMissing:
@@ -271,7 +273,10 @@ def analyze_photos(
         raise
 
     report.analyzed_now = done
-    report.cancelled = report.cancelled or bool(is_cancelled and is_cancelled())
+    report.cancelled = cancelled()
+    if report.cancelled:
+        report.elapsed = time.perf_counter() - started
+        return report
 
     # 清理照片库里已不存在的质量记录（不碰任何文件）
     try:
@@ -280,20 +285,25 @@ def analyze_photos(
         pass
 
     # 精确重复：为撞车的候补补算整文件哈希（数量很少）
-    _fill_content_hashes(store)
+    _fill_content_hashes(store, cancelled=cancelled)
     report.elapsed = time.perf_counter() - started
-    _augment_report(report, store, infos, cfg)
+    report.cancelled = cancelled()
+    if not report.cancelled:
+        _augment_report(report, store, infos, cfg, cancelled=cancelled)
+        report.cancelled = cancelled()
     return report
 
 
-def _fill_content_hashes(store: QualityStore) -> None:
+def _fill_content_hashes(store: QualityStore, *, cancelled=lambda: False) -> None:
     try:
         candidates = store.exact_duplicate_candidates()
     except Exception:
         return
     for measurement in candidates:
+        if cancelled():
+            return
         try:
-            digest = full_hash(measurement.path)
+            digest = full_hash(measurement.path, cancelled=cancelled)
         except OSError:
             continue
         store.set_content_hash(measurement.path, digest)
@@ -304,13 +314,17 @@ def _augment_report(
     store: QualityStore,
     infos: Sequence[PhotoInfo],
     config: QualityConfig,
+    *,
+    cancelled=lambda: False,
 ) -> None:
     """用数据库里的全量测量值补齐统计（预览来源 / 标记数 / 重复组）。"""
     measurements = list(store.iter_measurements())
-    infos_by_path = {str(Path(info.path).resolve()): info for info in infos}
+    infos_by_path = {db_key(info.path): info for info in infos}
     engine = QualityEngine(config)
     counts = {flag_id: 0 for flag_id in FLAG_LABELS}
     for measurement in measurements:
+        if cancelled():
+            return
         info = infos_by_path.get(measurement.path)
         for flag in engine.flags(measurement, info):
             counts[flag.flag_id] = counts.get(flag.flag_id, 0) + 1
@@ -328,7 +342,9 @@ def _augment_report(
         candidates = candidates_from(measurements, infos_by_path)
     else:
         candidates = candidates_from(measurements, {})
-    finding = DuplicateFinder(config).find(candidates)
+    finding = DuplicateFinder(config).find(candidates, cancelled=cancelled)
+    if cancelled():
+        return
     counts["duplicate"] = finding.flagged_count
     report.duplicate_groups = len(finding.groups)
     report.exact_groups = sum(1 for group in finding.groups if group.kind == "exact")
@@ -344,7 +360,7 @@ def rebuild_duplicates(
     """从数据库重新计算重复分组（GUI 刷新 / CLI 报告用）。"""
     cfg = config or QualityConfig()
     info_list = list(infos)
-    infos_by_path = {str(Path(info.path).resolve()): info for info in info_list}
+    infos_by_path = {db_key(info.path): info for info in info_list}
     measurements = list(store.iter_measurements())
     candidates = candidates_from(measurements, infos_by_path)
     return DuplicateFinder(cfg).find(candidates)

@@ -67,6 +67,7 @@ class ScannedFile:
     path: Path
     category: str
     size_bytes: int
+    mtime_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,7 @@ def scan_folder(
     root: str | os.PathLike[str],
     *,
     follow_symlinks: bool = False,
+    cancelled=lambda: False,
 ) -> ScanResult:
     """递归扫描 ``root`` 文件夹，返回 :class:`ScanResult`。
 
@@ -145,11 +147,11 @@ def scan_folder(
         result.issues.append(ScanIssue(root_path, "路径不存在或不是文件夹"))
         return result
 
-    _scan_directory(root_path, result, follow_symlinks=follow_symlinks)
+    _scan_directory(root_path, result, follow_symlinks=follow_symlinks, cancelled=cancelled)
     return result
 
 
-def _scan_directory(directory: Path, result: ScanResult, *, follow_symlinks: bool) -> None:
+def _scan_directory(directory: Path, result: ScanResult, *, follow_symlinks: bool, cancelled) -> None:
     """递归扫描单个文件夹，把结果写入 ``result``；出错只记录，不抛出。"""
     try:
         with os.scandir(directory) as entries:
@@ -160,28 +162,25 @@ def _scan_directory(directory: Path, result: ScanResult, *, follow_symlinks: boo
 
     # 排序只是为了让结果稳定，方便阅读和测试。
     for entry in sorted(dir_entries, key=lambda item: item.name.lower()):
+        if cancelled():
+            return
         path = Path(entry.path)
         try:
             if entry.is_dir(follow_symlinks=follow_symlinks):
-                _scan_directory(path, result, follow_symlinks=follow_symlinks)
+                if not follow_symlinks and path.is_junction():
+                    result.issues.append(ScanIssue(path, "已跳过：目录联接"))
+                else:
+                    _scan_directory(path, result, follow_symlinks=follow_symlinks, cancelled=cancelled)
             elif entry.is_file(follow_symlinks=follow_symlinks):
-                _scan_file(path, result)
+                try:
+                    stat = path.stat()
+                except OSError as exc:
+                    result.issues.append(ScanIssue(path, f"无法读取文件信息，已跳过: {exc}"))
+                else:
+                    result.files.append(ScannedFile(path, classify_file(path), stat.st_size, stat.st_mtime_ns))
             elif entry.is_symlink():
                 result.issues.append(ScanIssue(path, "已跳过：符号链接"))
             else:
                 result.issues.append(ScanIssue(path, "已跳过：不是普通文件"))
         except OSError as exc:
             result.issues.append(ScanIssue(path, f"无法访问，已跳过: {exc}"))
-
-
-def _scan_file(path: Path, result: ScanResult) -> None:
-    """读取单个文件的信息并归类；失败时只记录问题，不中断扫描。"""
-    try:
-        size_bytes = path.stat().st_size
-    except OSError as exc:
-        result.issues.append(ScanIssue(path, f"无法读取文件信息，已跳过: {exc}"))
-        return
-
-    result.files.append(
-        ScannedFile(path=path, category=classify_file(path), size_bytes=size_bytes)
-    )

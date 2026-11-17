@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.database import PhotoDatabase
-from src.exif_reader import read_photo_info
+from src.scan_catalog import scan_catalog
 from src.filtering import FilterSelection, matches as selection_matches
 from src.formatting import format_shutter, format_size
 from src.photo_info import (
@@ -68,7 +68,6 @@ from src.scanner import (
     CATEGORY_UNSUPPORTED,
     CATEGORY_VIDEO,
     ScanResult,
-    scan_folder,
 )
 
 #: 数据库默认位置。data/ 已在 .gitignore 中，真实数据不会上传到 GitHub。
@@ -115,20 +114,16 @@ class ScanOutcome:
         return any(issue.path == self.result.root for issue in self.result.issues)
 
 
-def run_scan(root: str | Path, db_path: str | Path = DEFAULT_DB) -> ScanOutcome:
+def run_scan(root: str | Path, db_path: str | Path = DEFAULT_DB, *, full: bool = False) -> ScanOutcome:
     """完整的 V1.5 流程：扫描 → 读 EXIF → 写数据库。
 
     任何单个文件的失败都只体现在结果的 ``exif_error`` / ``issues`` 里，
     本函数不抛异常（根目录无效也只是返回带 issue 的结果）。
     """
-    result = scan_folder(root)
-    infos = [read_photo_info(item.path, item.category) for item in result.files]
-
-    outcome = ScanOutcome(root=Path(root), result=result, infos=infos, db_path=Path(db_path))
     with PhotoDatabase.open(db_path) as database:
-        outcome.db_written = database.upsert_many(infos)
-        outcome.db_total = database.count_photos()
-    return outcome
+        result, infos, written = scan_catalog(database, root, full=full)
+        return ScanOutcome(root=Path(root), result=result, infos=infos, db_path=Path(db_path),
+                           db_written=written, db_total=database.count_photos())
 
 
 # --------------------------------------------------------------------------- #
@@ -680,7 +675,7 @@ def run_filter(
 
 
 def _cmd_scan(args) -> int:
-    outcome = run_scan(args.folder, db_path=args.db)
+    outcome = run_scan(args.folder, db_path=args.db, full=args.full)
     print(format_report(outcome))
     return 1 if outcome.root_is_invalid else 0
 
@@ -882,6 +877,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     scan_parser = subparsers.add_parser("scan", help="扫描文件夹，读取 EXIF，写入照片信息数据库")
     scan_parser.add_argument("folder", help="要扫描的照片文件夹")
+    scan_parser.add_argument("--full", action="store_true", help="重新读取所有文件")
     scan_parser.add_argument(
         "--db", default=str(DEFAULT_DB), help=f"SQLite 数据库路径（默认 {DEFAULT_DB}）"
     )

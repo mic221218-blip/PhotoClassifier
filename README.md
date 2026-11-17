@@ -195,6 +195,14 @@ presented and filtered through the same layer.
 
 ## Installation & Usage
 
+### Person AI preview
+
+Select one or more photos in the results list, then click **人物 AI** in the toolbar. Use **AI 建议 · 人物** in the left sidebar to filter suggestions and the details pane to inspect individual results. Suggestions are stored in the local catalog separately from manual tags. Canceling keeps completed results. JPEG, PNG, and NEF files with embedded previews are supported.
+
+The results list keeps selections as you move between pages. Use **清除选择** to clear all pages. **开始扫描** reuses records with matching file sizes and modification times. Use **全量重扫** or the CLI option `scan --full` to reread all files.
+
+This feature uses the optional dependencies in `requirements-ai.txt` and local YOLOX-Tiny and CLIP ViT-B/32 int8 weights under `models/`. An existing cache with the same structure under `.dsh_work/models/` also works. The four relative paths are `yolox_tiny.onnx`, `clip/int8/vision_model_int8.onnx`, `clip/int8/text_model_int8.onnx`, and `clip/tokenizer.json`.
+
 Requirements: Python 3.12+. Core features use the standard library only;
 **image quality analysis needs the optional Pillow**:
 
@@ -336,7 +344,7 @@ path to the clipboard so you can paste it into Explorer's address bar.
 python -m pytest
 ```
 
-The suite contains **327 tests**. Scanning, EXIF, rules, database and CLI tests
+The suite contains **335 tests**. Scanning, EXIF, rules, database and CLI tests
 use temporary files synthesized to the TIFF / EXIF / PNG specifications
 (`tests/exif_maker.py`); quality tests draw small images with Pillow
 (`tests/image_maker.py`) and cover NEF embedded previews, blur/exposure,
@@ -411,12 +419,12 @@ PhotoClassifier/
 | EXIF reading | Minimal in-house parser on the standard library | NEF is essentially TIFF and JPEG EXIF lives in APP1; all needed fields are standard tags. Zero dependencies, fully offline, and it can precisely distinguish "corrupted" from "no EXIF" |
 | Database | SQLite (stdlib `sqlite3`) | Single file, zero configuration, sufficient; absolute-path primary key supports de-duplicated rescans |
 | Platform | Windows first | The real-world scenario for stage one; the code uses no platform-specific APIs |
-| AI | Optional & pluggable | EXIF + rules first; visual recognition (V3.5) will compare traditional CV / local models / cloud APIs |
+| AI | Optional & pluggable | EXIF + rules first; V3.5 has tested offline inference on a small sample |
 | Quality pixel source | NEF embedded JPEG preview; no RAW decoding | The preview is enough for sharpness, exposure and similarity, is an order of magnitude faster than full RAW decoding, and avoids binary dependencies such as libraw |
 | Quality storage | Store **measurements only**, derive verdicts live | Same pattern as V2 "rules are never stored": threshold changes need no pixel re-read; `photo_quality` is a separate table (zero migration risk) |
 | Image decoding | Pillow as an **optional dependency**, only in `preview.py` | Mature, wheel-only, supports JPEG `draft()` downscaling; the core works without it |
 | Duplicates | Exact (full hash) + near (dHash + time window) + sequence exemption | In real timelapse footage, similar consecutive frames are normal; same-name RAW+JPEG pairs are two formats of one photo |
-| Tag storage | User tags stored; system tags (rules/quality) derived live | Threshold changes take effect immediately and never leave stale tags; V3.5 model tags can use the same table |
+| Tag storage | User tags stored; system tags (rules/quality) derived live | Threshold changes take effect immediately; V3.5 proposes storing AI predictions separately |
 | Tag structure | Flat `tags` + `photo_tags` | Do "one photo, many tags" properly first; hierarchy/expressions belong to V4 |
 | Tag filtering | Rules + quality + tags share `FilterSelection` | GUI and CLI behave identically; V4 only extends the selection with numeric conditions |
 | Tag persistence | Database only, no EXIF/XMP writes | Original-photo safety; keyword/XMP export belongs to V5 |
@@ -431,10 +439,12 @@ PhotoClassifier/
 | V2 | Rule-based classification (night / high-ISO / slow shutter / telephoto / wide-angle / fast lens; CLI + GUI filtering) | ✅ Done |
 | V2.5 | Image quality analysis (blur / motion blur / exposure anomalies / black frames / duplicates / timelapse sequences; CLI + GUI, hints only, never auto-delete) | ✅ Done |
 | V3 | Multi-tag system (user tags + rule/quality system tags, unified filtering, batch and undo; CLI + GUI) | ✅ Done (current) |
-| V3.5 | Visual recognition (compare traditional CV / local models / AI APIs) | Planned |
+| V3.5 | Offline visual recognition | Person filtering available in a desktop preview; scene labels under evaluation |
 | V4 | Smart filtering (AND / OR combos of tags + EXIF conditions) | Planned |
 | V5 | Lightroom workflow (reveal in Explorer / batch paths / export to folder) | Planned |
 | V6 | GUI (pulled forward: shell implemented — folder library, scan progress, detail panel; Tkinter for now, PySide6 to be evaluated when the environment allows) | 🔨 Shell implemented |
+
+The [V3.5 validation and performance report](docs/v3.5-validation.zh-CN.md) records the current desktop behavior and the original experiments.
 
 Future extensions: more RAW formats (CR3 / ARW / RAF / DNG / ORF / RW2), map
 view, timeline, camera & lens statistics, similar-photo clustering, batch

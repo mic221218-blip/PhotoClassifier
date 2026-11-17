@@ -142,7 +142,9 @@ class DuplicateFinder:
     def __init__(self, config: QualityConfig | None = None):
         self.config = config or QualityConfig()
 
-    def find(self, candidates: Iterable[DuplicateCandidate]) -> DuplicateResult:
+    def find(self, candidates: Iterable[DuplicateCandidate], *, cancelled=lambda: False) -> DuplicateResult:
+        if cancelled():
+            return DuplicateResult()
         items = list(candidates)
         sequences: list[DuplicateGroup] = []
 
@@ -150,6 +152,8 @@ class DuplicateFinder:
         sequence_paths: set[str] = set()
         sequence_dirs: set[str] = set()
         for members in self._sequence_runs(items):
+            if cancelled():
+                return DuplicateResult()
             sequence_paths.update(member.path for member in members)
             sequence_dirs.update(str(Path(member.path).parent) for member in members)
             times = [member.timestamp for member in members if member.timestamp is not None]
@@ -166,11 +170,13 @@ class DuplicateFinder:
         raw: list[tuple[str, tuple[DuplicateCandidate, ...], int | None, float | None]] = []
         for members, distance, span in self._exact_groups(items):
             raw.append(("exact", members, distance, span))
-        for members, distance, span in self._near_groups(remaining):
+        for members, distance, span in self._near_groups(remaining, cancelled=cancelled):
             raw.append(("near", members, distance, span))
 
         duplicates: list[DuplicateGroup] = []
         for kind, members, distance, span in raw:
+            if cancelled():
+                return DuplicateResult()
             group = DuplicateGroup(
                 group_id=0,
                 kind=kind,
@@ -286,7 +292,7 @@ class DuplicateFinder:
 
     # ---- 近似重复 -------------------------------------------------------- #
 
-    def _near_groups(self, items: list[DuplicateCandidate]):
+    def _near_groups(self, items: list[DuplicateCandidate], *, cancelled=lambda: False):
         timed = [item for item in items if item.dhash and item.timestamp is not None]
         timed.sort(key=lambda item: item.timestamp)
         parent = list(range(len(timed)))
@@ -305,6 +311,8 @@ class DuplicateFinder:
         window = self.config.dupe_time_window_s
         distance_max = self.config.dhash_distance_max
         for i, left in enumerate(timed):
+            if cancelled():
+                return []
             left_time = left.timestamp
             assert left_time is not None
             for j in range(i + 1, len(timed)):
@@ -324,10 +332,12 @@ class DuplicateFinder:
 
         groups = []
         for indexes in components.values():
+            if cancelled():
+                return []
             if len(indexes) < 2:
                 continue
             members = [timed[index] for index in indexes]
-            distance = self._max_distance(members)
+            distance = self._max_distance(members, cancelled=cancelled)
             times = [member.timestamp for member in members if member.timestamp is not None]
             span = (max(times) - min(times)) if times else None
             groups.append((self._sorted_members(members), distance, span))
@@ -348,13 +358,15 @@ class DuplicateFinder:
         return len(parents) == 1 and parents.pop() in sequence_dirs
 
     @staticmethod
-    def _max_distance(members: list[DuplicateCandidate]) -> int | None:
+    def _max_distance(members: list[DuplicateCandidate], *, cancelled=lambda: False) -> int | None:
         """组内两两 dHash 距离的最大值（比"参照一张"更保守、更可解释）。"""
         hashes = [member.dhash for member in members if member.dhash]
         if len(hashes) < 2:
             return None
         maximum = 0
         for i in range(len(hashes)):
+            if cancelled():
+                return None
             for j in range(i + 1, len(hashes)):
                 maximum = max(maximum, hamming_distance(hashes[i], hashes[j]))
         return maximum

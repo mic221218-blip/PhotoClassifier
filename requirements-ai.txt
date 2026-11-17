@@ -1,0 +1,4 @@
+-r requirements-quality.txt
+numpy>=1.26
+onnxruntime>=1.18
+tokenizers>=0.20
