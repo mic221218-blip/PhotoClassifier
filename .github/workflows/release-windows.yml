@@ -29,9 +29,15 @@ jobs:
         run: |
           $icon = (Resolve-Path 'assets/photoclassifier.ico').Path
           $pythonLicense = python -c "import sys; from pathlib import Path; print(Path(sys.base_prefix) / 'LICENSE.txt')"
+          $onnxRuntime = python -c "from importlib.metadata import distribution; print(distribution('onnxruntime').locate_file('onnxruntime'))"
+          $buildDir = New-Item -ItemType Directory -Force '.dsh_work/release'
+          $tokenizersLicense = Join-Path $buildDir.FullName 'Tokenizers-LICENSE.txt'
+          Invoke-WebRequest 'https://raw.githubusercontent.com/huggingface/tokenizers/v0.23.3/LICENSE' -OutFile $tokenizersLicense
           python -m PyInstaller --noconfirm --onedir --windowed --name PhotoClassifier `
             --icon $icon --add-data "${icon}:assets" `
-            --add-data "${pythonLicense}:licenses" `
+            --add-data "${pythonLicense}:licenses" --add-data "${tokenizersLicense}:licenses" `
+            --add-data "${onnxRuntime}/LICENSE:licenses/onnxruntime" `
+            --add-data "${onnxRuntime}/ThirdPartyNotices.txt:licenses/onnxruntime" `
             --collect-binaries onnxruntime `
             --recursive-copy-metadata Pillow --recursive-copy-metadata numpy `
             --recursive-copy-metadata onnxruntime --recursive-copy-metadata tokenizers `
