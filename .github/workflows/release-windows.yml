@@ -27,9 +27,10 @@ jobs:
 
       - name: Bundle the desktop app
         run: |
+          $icon = (Resolve-Path 'assets/photoclassifier.ico').Path
           $pythonLicense = python -c "import sys; from pathlib import Path; print(Path(sys.base_prefix) / 'LICENSE.txt')"
           python -m PyInstaller --noconfirm --onedir --windowed --name PhotoClassifier `
-            --icon assets/photoclassifier.ico --add-data 'assets/photoclassifier.ico:assets' `
+            --icon $icon --add-data "${icon}:assets" `
             --add-data "${pythonLicense}:licenses" `
             --collect-binaries onnxruntime `
             --recursive-copy-metadata Pillow --recursive-copy-metadata numpy `
