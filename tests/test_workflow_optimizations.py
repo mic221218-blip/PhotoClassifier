@@ -30,6 +30,7 @@ def test_incremental_scan_handles_same_size_same_second_change_and_full_scan(tmp
     with PhotoDatabase.open(db_path) as db:
         info = db.get_photo(photo)
         db.save_person_result(info, "test", info.file_mtime_ns, True, 0.1)
+        db.save_sky_result(info, "test", info.file_mtime_ns, True, 0.7)
     stat = photo.stat()
     second = stat.st_mtime_ns // 1_000_000_000
     changed = second * 1_000_000_000 + (25 if stat.st_mtime_ns != second * 1_000_000_000 + 25 else 250)
@@ -38,6 +39,8 @@ def test_incremental_scan_handles_same_size_same_second_change_and_full_scan(tmp
     assert run_scan(library, db_path).db_written == 1
     with PhotoDatabase.open(db_path) as db:
         assert db.person_results("test") == {}
+        assert db.sky_results("test") == {}
+        assert db._conn.execute("SELECT COUNT(*) FROM photo_sky_ai").fetchone()[0] == 0
     assert run_scan(library, db_path, full=True).db_written == 1
     assert len(reads) == 3
 

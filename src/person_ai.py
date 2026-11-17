@@ -2,14 +2,12 @@
 from __future__ import annotations
 
 import math
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
+from src.ai_analysis import analyze_batch
 from src.photo_info import PhotoInfo
-from src.preview import PreviewError, load_color_preview
-from src.work_queue import bounded_results
+from src.preview import load_color_preview
 
 MODEL_VERSION = "yolox-tiny-clip-int8-person-v1"
 DETECTION_THRESHOLD = 0.72
@@ -160,54 +158,14 @@ class PersonAnalyzer:
 
 
 def analyze_selection(infos, db, *, progress, cancelled, make_analyzer=PersonAnalyzer, workers=2):
-    """Read chosen photos, retaining completed results when a batch is cancelled."""
-    analyzer = None
-    analyzed = reused = failed = 0
-    first_error = None
-    def pending():
-        nonlocal analyzer, reused, failed, first_error
-        for info in infos:
-            if cancelled():
-                return
-            try:
-                before = info.path.stat()
-                modified_at = datetime.fromtimestamp(before.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-                if (before.st_size, modified_at) != (info.size_bytes, info.modified_at):
-                    raise PreviewError("原片已变更，请先重新扫描")
-            except (OSError, PreviewError) as exc:
-                failed += 1
-                first_error = first_error or str(exc)
-                continue
-            if db.has_person_result(info, MODEL_VERSION, before.st_mtime_ns):
-                reused += 1
-                progress(analyzed + reused + failed, len(infos), info.file_name)
-                continue
-            if analyzer is None:
-                progress(analyzed + reused + failed, len(infos), info.file_name)
-                analyzer = make_analyzer()
-            if not cancelled():
-                yield info, before
-
-    def analyze(item):
-        info, before = item
-        result = analyzer.analyze(info)
-        after = info.path.stat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-            raise PreviewError("分析时原片发生变化，请重新扫描")
-        return result
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for (info, before), future in bounded_results(pool, pending(), analyze, limit=workers, cancelled=cancelled):
-            try:
-                result = future.result()
-            except Exception as exc:
-                failed += 1
-                first_error = first_error or str(exc)
-            else:
-                if db.save_person_result(info, MODEL_VERSION, before.st_mtime_ns, result.detected, result.margin):
-                    analyzed += 1
-                else:
-                    failed += 1
-                    first_error = first_error or "照片库记录已变化，请刷新后重试"
-            progress(analyzed + reused + failed, len(infos), info.file_name)
-    return analyzed, reused, failed, first_error
+    return analyze_batch(
+        infos,
+        make_analyzer=make_analyzer,
+        has_result=lambda info, mtime: db.has_person_result(info, MODEL_VERSION, mtime),
+        save_result=lambda info, mtime, result: db.save_person_result(
+            info, MODEL_VERSION, mtime, result.detected, result.margin
+        ),
+        progress=progress,
+        cancelled=cancelled,
+        workers=workers,
+    )

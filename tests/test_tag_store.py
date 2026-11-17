@@ -172,7 +172,7 @@ def test_migration_from_v1_seeds_tags_and_keeps_photos(db_path: Path) -> None:
         tag_count = connection.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
     finally:
         connection.close()
-    assert version == SCHEMA_VERSION == 4
+    assert version == SCHEMA_VERSION
     assert tag_count == len(PRESET_TAGS)
 
 

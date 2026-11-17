@@ -103,27 +103,31 @@ class TagDialogsMixin:
         iid = self.result_tree.identify_row(event.y)
         if not iid:
             return
-        if iid not in self.result_tree.selection():
-            self.clear_result_selection()
+        if not self._selecting_results and iid not in self.result_tree.selection():
             self.result_tree.selection_set(iid)
+            self.result_tree.focus(iid)
+        self.set_detail(self.infos_by_iid[iid])
         count = len(self._selected_infos())
+        batch_state = "normal" if count else "disabled"
         menu = tk.Menu(self.root, tearoff=0, bg=CARD_BG, fg=TEXT, activebackground=ACCENT_DIM)
         menu.add_command(label="打开图片", command=self.open_selected)
         menu.add_command(label="打开文件位置", command=self.reveal_selected)
         menu.add_separator()
-        menu.add_command(label=f"添加标签…（{count} 张）", command=self.batch_add_tags)
-        menu.add_command(label=f"移除标签…（{count} 张）", command=self.batch_remove_tags)
+        menu.add_command(label=f"添加标签…（{count} 张）", command=self.batch_add_tags, state=batch_state)
+        menu.add_command(label=f"移除标签…（{count} 张）", command=self.batch_remove_tags, state=batch_state)
         menu.add_separator()
         menu.add_command(label="复制路径", command=self.copy_selected_path)
         menu.add_separator()
         menu.add_command(
             label="取消精选" if self._selected_all_picked() else "标记精选",
             command=self.toggle_picked,
+            state=batch_state,
         )
         menu.add_separator()
         menu.add_command(
             label=f"从照片库移除…（{count} 张）",
             command=self.remove_selected_photos,
+            state=batch_state,
             foreground="#ff8a8a",
         )
         menu.tk_popup(event.x_root, event.y_root)

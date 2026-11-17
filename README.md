@@ -195,13 +195,19 @@ presented and filtered through the same layer.
 
 ## Installation & Usage
 
-### Person AI preview
+### Person and sky AI preview
 
-Select one or more photos in the results list, then click **人物 AI** in the toolbar. Use **AI 建议 · 人物** in the left sidebar to filter suggestions and the details pane to inspect individual results. Suggestions are stored in the local catalog separately from manual tags. Canceling keeps completed results. JPEG, PNG, and NEF files with embedded previews are supported.
+Click a filename to preview it. Choose **选择照片** to enter selection mode, then click anywhere on a row or its checkbox to select or deselect it. Ctrl-click or press Space to toggle one row. Shift-click selects a range on the current page. Selections carry across pages, and **全选本页** selects every item on the current page. Click **取消选择** or press Escape to clear the selection across all pages and return to browsing. When filters change, matching items stay selected.
 
-The results list keeps selections as you move between pages. Use **清除选择** to clear all pages. **开始扫描** reuses records with matching file sizes and modification times. Use **全量重扫** or the CLI option `scan --full` to reread all files.
+Choose people, sky, or both from **AI 分析**. If the selection contains unsupported files such as videos, the button displays the number of photos it can analyze.
+
+Use **AI 建议** in the sidebar to filter results and inspect individual suggestions in the details pane. A photo can receive both suggestions. Sky can also be a meaningful part of a cityscape, sunrise, or sunset. Suggestions are stored in the local catalog separately from manual tags. Canceling keeps completed results. JPEG, PNG, and NEF files with embedded previews are supported.
+
+**开始扫描** reuses records with matching file sizes and modification times. Use **全量重扫** or the CLI option `scan --full` to reread all files.
 
 This feature uses the optional dependencies in `requirements-ai.txt` and local YOLOX-Tiny and CLIP ViT-B/32 int8 weights under `models/`. An existing cache with the same structure under `.dsh_work/models/` also works. The four relative paths are `yolox_tiny.onnx`, `clip/int8/vision_model_int8.onnx`, `clip/int8/text_model_int8.onnx`, and `clip/tokenizer.json`.
+
+The sky preview uses the same optional dependencies and loads the evaluated SegFormer-B0 ONNX weights from `models/segformer-b0/model.onnx` or the same relative path under `.dsh_work/models/`. The upstream license covers research and evaluation. [Model file](https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-512/blob/main/onnx/model.onnx) · [Upstream license](https://github.com/NVlabs/SegFormer/blob/master/LICENSE)
 
 Requirements: Python 3.12+. Core features use the standard library only;
 **image quality analysis needs the optional Pillow**:
@@ -439,7 +445,7 @@ PhotoClassifier/
 | V2 | Rule-based classification (night / high-ISO / slow shutter / telephoto / wide-angle / fast lens; CLI + GUI filtering) | ✅ Done |
 | V2.5 | Image quality analysis (blur / motion blur / exposure anomalies / black frames / duplicates / timelapse sequences; CLI + GUI, hints only, never auto-delete) | ✅ Done |
 | V3 | Multi-tag system (user tags + rule/quality system tags, unified filtering, batch and undo; CLI + GUI) | ✅ Done (current) |
-| V3.5 | Offline visual recognition | Person filtering available in a desktop preview; scene labels under evaluation |
+| V3.5 | Offline visual recognition | Person and sky filtering available in the desktop preview |
 | V4 | Smart filtering (AND / OR combos of tags + EXIF conditions) | Planned |
 | V5 | Lightroom workflow (reveal in Explorer / batch paths / export to folder) | Planned |
 | V6 | GUI (pulled forward: shell implemented — folder library, scan progress, detail panel; Tkinter for now, PySide6 to be evaluated when the environment allows) | 🔨 Shell implemented |

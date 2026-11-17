@@ -31,7 +31,7 @@ from src.database import PhotoDatabase
 from src.duplicates import DuplicateResult
 from src.filtering import FilterSelection, matches as selection_matches
 from src.formatting import format_shutter, format_size
-from src.person_ai import MODEL_VERSION
+from src.person_ai import MODEL_VERSION as PERSON_MODEL_VERSION
 from src.photo_info import EXIF_ERROR, EXIF_NO_EXIF, EXIF_OK, PhotoInfo
 from src.preview import PILLOW_AVAILABLE, is_supported
 from src.quality import (
@@ -45,11 +45,12 @@ from src.quality_scan import AnalyzeOptions, analyze_photos, rebuild_duplicates
 from src.quality_sort import SORT_DEFAULT, SORT_SHARPNESS, sharpness_key, sharpness_score
 from src.quality_store import QualityStore
 from src.rules import RULE_REGISTRY, RuleEngine, RuleMatch
+from src.sky_ai import MODEL_VERSION as SKY_MODEL_VERSION
 from src.tag_controller import TagController
 from src.tag_store import Tag, TagStore
 from src.ui_detail import DetailMixin
 from src.ui_panels import PanelsMixin
-from src.ui_person import PersonAIMixin
+from src.ui_ai import AIAnalysisMixin
 from src.ui_thumbnail import ThumbnailMixin
 from src.ui_tag_dialogs import TagDialogsMixin
 from src.tags import (
@@ -87,7 +88,7 @@ from src.ui_theme import (  # noqa: E402  (主题常量集中管理)
 
 RESULT_PAGE_SIZE = 250
 
-class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixin, ThumbnailMixin):
+class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMixin, ThumbnailMixin):
     """主窗口应用。``root`` 由调用方创建，方便测试与自检。"""
 
     def __init__(self, root: tk.Tk, db_path: str | Path = DEFAULT_DB):
@@ -106,6 +107,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
         self._rule_cache: dict[str, list[RuleMatch]] = {}
         self._matched_iids: list[str] = []
         self._selected_iids: set[str] = set()
+        self._selecting_results = False
+        self._selection_anchor = ""
         self._result_page = 0
         self._catalog_total = 0
         self.current: PhotoInfo | None = None
@@ -117,7 +120,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
         self.analyze_cancel = threading.Event()
         self.analyze_queue: queue.Queue = queue.Queue()
         self.analyze_report = None
-        self._init_person_analysis()
+        self._init_ai_analysis()
 
         self.rule_engine = RuleEngine()
         self.quality_engine = QualityEngine()
@@ -139,11 +142,11 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
         self._setup_window()
         self._build_styles()
         self._build_toolbar()
+        self._build_status_bar()
         self._build_left_panel()
         # 先放右侧详情面板、再放中间（中间 expand 会吃掉剩余空间）
         self._build_detail_panel()
         self._build_center()
-        self._build_status_bar()
 
         self.refresh_library()
         self.refresh_tags()
@@ -151,6 +154,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
         self.refresh_status_bar()
         self.root.bind_all("<MouseWheel>", self._on_mousewheel)
         self.root.bind_all("<Control-z>", lambda _event: self.undo_last_tag_operation())
+        self.root.bind("<Escape>", self._on_result_selection_escape)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _on_mousewheel(self, event) -> None:
@@ -243,18 +247,65 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
     # ------------------------------------------------------------------ #
 
     def _selected_infos(self) -> list[PhotoInfo]:
-        self._capture_result_selection()
-        return [self.infos_by_iid[iid] for iid in sorted(self._selected_iids) if iid in self.infos_by_iid]
+        iids = self._selected_iids if self._selecting_results else self.result_tree.selection()
+        return [self.infos_by_iid[iid] for iid in sorted(iids) if iid in self.infos_by_iid]
 
-    def _capture_result_selection(self) -> None:
-        self._selected_iids.difference_update(self.result_tree.get_children())
-        self._selected_iids.update(self.result_tree.selection())
+    def start_result_selection(self) -> None:
+        if self._selecting_results or not self.result_tree.get_children():
+            return
+        self._selecting_results = True
+        self.btn_select_results.pack_forget()
+        self.selection_actions.pack(fill="x")
+        self.result_tree.configure(show="tree headings", selectmode="none")
+        self.result_tree.xview_moveto(0)
+        self.result_tree.focus_set()
+        self._sync_result_selection()
 
-    def clear_result_selection(self) -> None:
+    def cancel_result_selection(self) -> None:
+        self._selecting_results = False
         self._selected_iids.clear()
-        self.result_tree.selection_set(())
+        self._selection_anchor = ""
+        self.result_tree.focus("")
+        self.result_tree.configure(show="headings", selectmode="extended")
+        self.selection_actions.pack_forget()
+        self.btn_select_results.pack(side="left", padx=8, pady=5)
+        self._sync_result_selection()
+
+    def _on_result_selection_escape(self, _event) -> str | None:
+        if not self._selecting_results or not self.result_frame.winfo_ismapped():
+            return None
+        self.cancel_result_selection()
+        return "break"
+
+    def toggle_result_page_selection(self) -> None:
+        if not self._selecting_results:
+            return
+        page = set(self.result_tree.get_children())
+        if page <= self._selected_iids:
+            self._selected_iids.difference_update(page)
+        else:
+            self._selected_iids.update(page)
+        self._selection_anchor = ""
+        self._sync_result_selection()
+
+    def _sync_result_selection(self) -> None:
+        tree = self.result_tree
+        page = tree.get_children()
+        selection = tuple(iid for iid in page if iid in self._selected_iids)
+        if tree.selection() != selection:
+            tree.selection_set(selection)
+        for iid in page:
+            mark = "☑" if iid in self._selected_iids else "☐"
+            if tree.item(iid, "text") != mark:
+                tree.item(iid, text=mark)
+        count = len(self._selected_iids)
+        self.selection_count.config(text=f"已选 {count:,} 张")
+        self.btn_select_page.config(
+            text="取消本页选择" if page and len(selection) == len(page) else "全选本页",
+            state="normal" if page else "disabled",
+        )
+        self._update_ai_button()
         self._update_pick_button()
-        self._update_page_controls()
 
     def _on_delete_key(self, _event=None) -> str:
         self.remove_selected_photos()
@@ -393,7 +444,6 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
     # ------------------------------------------------------------------ #
 
     def refresh_results(self, *, skip_duplicate_rebuild: bool = False) -> None:
-        self._capture_result_selection()
         folders = sorted(self.checked_folders) or [f.path for f in self.db.list_folders()]
         photos = self.db.find_photos_under(folders)
         previous_infos = self.infos_by_iid
@@ -402,7 +452,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
         self.matches_by_iid = {}
         self.quality_by_iid = {}
         self._rule_cache = {}
-        self.person_results = self.db.person_results(MODEL_VERSION)
+        self.person_results = self.db.person_results(PERSON_MODEL_VERSION)
+        self.sky_results = self.db.sky_results(SKY_MODEL_VERSION)
         self._ensure_quality_cache(photos, skip_duplicates=skip_duplicate_rebuild)
         self._ensure_tag_cache()
         if self.sort_mode == SORT_SHARPNESS:
@@ -440,8 +491,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
         return max(1, (len(self._matched_iids) + RESULT_PAGE_SIZE - 1) // RESULT_PAGE_SIZE)
 
     def change_result_page(self, step: int) -> None:
-        self._capture_result_selection()
         self._result_page = max(0, min(self._result_page + step, self._page_count() - 1))
+        self._selection_anchor = ""
         self._render_result_page()
         self.result_tree.yview_moveto(0)
 
@@ -463,8 +514,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
             if user_tags:
                 user_text = " · ".join(f"★{tag.name}" for tag in user_tags)
                 labels = f"{user_text} ｜ {labels}" if labels else user_text
-            if self.has_ai_person(info):
-                labels = f"{labels} ｜ AI · 人物" if labels else "AI · 人物"
+            ai_tags = [name for name, hit in (("人物", self.has_ai_person(info)), ("天空", self.has_ai_sky(info))) if hit]
+            if ai_tags:
+                ai_text = "AI · " + " · ".join(ai_tags)
+                labels = f"{labels} ｜ {ai_text}" if labels else ai_text
             measurement = self.measurements_by_path.get(str(info.path))
             quality_text = " · ".join(
                 _QUALITY_SHORT.get(flag.flag_id, flag.label) for flag in quality_flags
@@ -503,17 +556,18 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
                 self.result_tree.insert("", "end", iid=iid, values=values, tags=tags)
         if tuple(page) != self.result_tree.get_children():
             self.result_tree.set_children("", *page)
-        selection = tuple(iid for iid in page if iid in self._selected_iids)
-        if selection != self.result_tree.selection():
-            self.result_tree.selection_set(selection)
-        self._update_pick_button()
+        if self._selecting_results:
+            self._sync_result_selection()
+        else:
+            self._update_pick_button()
         self._update_page_controls()
 
     def _update_page_controls(self) -> None:
         pages = self._page_count()
         self.btn_result_prev.config(state="normal" if self._result_page else "disabled")
         self.btn_result_next.config(state="normal" if self._result_page + 1 < pages else "disabled")
-        self.page_status.config(text=f"第 {self._result_page + 1} / {pages} 页 · 已选 {len(self._selected_iids):,} 张")
+        self.page_status.config(text=f"第 {self._result_page + 1} / {pages} 页")
+        self.btn_select_results.config(state="normal" if self._matched_iids else "disabled")
         filter_note = ""
         if (
             self.active_rules
@@ -522,6 +576,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
             or self.gps_only.get()
             or self.quality_ok_var.get()
             or self.person_filter.get()
+            or self.sky_filter.get()
         ):
             filter_note = " · 已筛选"
         sort_note = " · 按清晰度排序" if self.sort_mode == SORT_SHARPNESS else ""
@@ -563,7 +618,6 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
         infos = self._selected_infos()
         if not infos:
             return
-        selected_iids = list(self.result_tree.selection())
         tag = self.tag_controller.get_by_name(PICK_TAG_NAME)
         if tag is not None and self._selected_all_picked(infos):
             removed = self.tag_controller.apply_remove(
@@ -579,11 +633,6 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
             if unknown:
                 message += f"，跳过 {len(unknown)} 个未知路径"
         self._after_tag_change(message)
-        kept = [iid for iid in selected_iids if self.result_tree.exists(iid)]
-        if kept:
-            self.result_tree.selection_set(kept)
-            self._on_result_select()
-        self._update_pick_button()
 
     def toggle_quality_sort(self) -> None:
         """在“默认顺序”和“清晰度优先”之间切换。"""
@@ -662,6 +711,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
             gps_only=self.gps_only.get(),
             quality_ok=self.quality_ok_var.get(),
             ai_person_only=self.person_filter.get(),
+            ai_sky_only=self.sky_filter.get(),
         )
 
     def _passes_filter(
@@ -682,6 +732,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
             tag_hits={tag.id for tag in (user_tags or [])},
             selection=selection,
             ai_person=self.has_ai_person(info),
+            ai_sky=self.has_ai_sky(info),
         )
 
     def _on_quality_flag_changed(self) -> None:
@@ -718,6 +769,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
         self.gps_only.set(False)
         self.quality_ok_var.set(False)
         self.person_filter.set(False)
+        self.sky_filter.set(False)
         self.active_rules = set()
         self.active_quality = set()
         self.active_tags = set()
@@ -728,20 +780,61 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
     def _select_target() -> PhotoInfo | None:
         return None
 
-    def _on_result_double_click(self, _event=None) -> None:
+    def _on_result_click(self, event, *, toggle: bool = False, extend: bool = False) -> str | None:
+        tree = self.result_tree
+        if tree.identify_region(event.x, event.y) not in ("tree", "cell"):
+            return None
+        iid = tree.identify_row(event.y)
+        if not iid:
+            return None
+        if not self._selecting_results:
+            if not (toggle or extend):
+                return None
+            previous = tree.selection()
+            self.start_result_selection()
+            if previous:
+                self._selection_anchor = previous[0]
+                if toggle:
+                    self._selected_iids.add(previous[0])
+        tree.focus_set()
+        self._select_result_row(iid, extend=extend)
+        return "break"
+
+    def _select_result_row(self, iid: str, *, extend: bool = False) -> None:
+        tree = self.result_tree
+        page = tree.get_children()
+        if extend and self._selection_anchor in page:
+            first, last = sorted((page.index(self._selection_anchor), page.index(iid)))
+            self._selected_iids.difference_update(page)
+            self._selected_iids.update(page[first:last + 1])
+        else:
+            self._selected_iids.symmetric_difference_update((iid,))
+            self._selection_anchor = iid
+        tree.focus(iid)
+        self.set_detail(self.infos_by_iid[iid])
+        self._sync_result_selection()
+
+    def _on_result_space(self, _event) -> str:
+        iid = self.result_tree.focus()
+        if iid:
+            self.start_result_selection()
+            self._select_result_row(iid)
+        return "break"
+
+    def _on_result_double_click(self, event) -> str | None:
         """双击结果行：用默认程序打开图片（不是打开所在文件夹）。"""
-        self.open_selected()
+        if self._selecting_results:
+            return self._on_result_click(event)
+        if self.result_tree.identify_region(event.x, event.y) == "cell":
+            self.open_selected()
+        return None
 
     def _on_result_select(self, _event=None) -> None:
-        self._capture_result_selection()
-        self._update_page_controls()
-        selection = self.result_tree.selection()
-        if not selection:
-            self._update_pick_button()
+        if self._selecting_results:
             return
-        info = self.infos_by_iid.get(selection[0])
-        if info is not None:
-            self.set_detail(info)
+        selection = self.result_tree.selection()
+        if selection:
+            self.set_detail(self.infos_by_iid[selection[0]])
         self._update_pick_button()
 
     def open_selected(self) -> None:
@@ -782,7 +875,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
     # ------------------------------------------------------------------ #
 
     def start_scan(self, *, full: bool = False) -> None:
-        if self.person_thread is not None:
+        if self.ai_thread is not None:
             return
         if self.scan_thread and self.scan_thread.is_alive():
             return
@@ -817,14 +910,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
             self.progress_current.config(text="")
             self.btn_scan.config(text="扫描中…", state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
             self.btn_analyze.config(state="disabled", fg=TEXT_FAINT)
-            self.btn_person.config(state="disabled")
             for btn in (self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
                 btn.config(state="disabled")
         else:
             self.progress_frame.pack_forget()
             self.result_frame.pack(fill="both", expand=True)
             self.btn_scan.config(text="开始扫描", state="normal", bg=ACCENT, fg="#ffffff")
-            self.btn_person.config(state="normal")
             if PILLOW_AVAILABLE:
                 self.btn_analyze.config(state="normal", fg=TEXT)
             for btn in (self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
@@ -901,7 +992,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
     # ------------------------------------------------------------------ #
 
     def start_analysis(self) -> None:
-        if self.person_thread is not None:
+        if self.ai_thread is not None:
             return
         if not PILLOW_AVAILABLE:
             messagebox.showinfo(
@@ -956,7 +1047,6 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
             self.progress_current.config(text="准备中……")
             self.btn_analyze.config(text="分析中…", state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
             self.btn_scan.config(state="disabled", bg=INPUT_BG, fg=TEXT_FAINT)
-            self.btn_person.config(state="disabled")
             for btn in (self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
                 btn.config(state="disabled")
         else:
@@ -964,7 +1054,6 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
             self.result_frame.pack(fill="both", expand=True)
             self.btn_analyze.config(text="质量分析", state="normal", bg=INPUT_BG, fg=TEXT)
             self.btn_scan.config(text="开始扫描", state="normal", bg=ACCENT, fg="#ffffff")
-            self.btn_person.config(state="normal")
             self.btn_cancel.config(command=self.cancel_scan)
             for btn in (self.btn_browse, self.btn_add, self.btn_remove, self.btn_rescan):
                 btn.config(state="normal")
@@ -1024,7 +1113,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, PersonAIMixi
     def _on_close(self) -> None:
         self.cancel_event.set()
         self.analyze_cancel.set()
-        self.person_cancel.set()
+        self.ai_cancel.set()
         try:
             self.db.close()
         finally:

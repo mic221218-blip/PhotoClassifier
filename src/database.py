@@ -169,10 +169,22 @@ CREATE TABLE IF NOT EXISTS photo_person_ai (
 );
 """
 
-_SCHEMA = _SCHEMA + QUALITY_SCHEMA + TAGS_SCHEMA + PERSON_SCHEMA
+SKY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS photo_sky_ai (
+    path            TEXT PRIMARY KEY,
+    model_version   TEXT NOT NULL,
+    file_size       INTEGER NOT NULL,
+    file_mtime      TEXT,
+    file_mtime_ns   INTEGER NOT NULL,
+    detected        INTEGER NOT NULL CHECK (detected IN (0, 1)),
+    visible_fraction REAL NOT NULL
+);
+"""
+
+_SCHEMA = _SCHEMA + QUALITY_SCHEMA + TAGS_SCHEMA + PERSON_SCHEMA + SKY_SCHEMA
 
 #: 当前 schema 版本（写入 ``PRAGMA user_version``，为后续迁移留钩子）。
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 #: 按 path 去重的写入语句（列清单固定，编译一次即可）。
 _UPSERT_SQL = """
@@ -281,8 +293,10 @@ class PhotoDatabase:
                 columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(photos)")}
                 if "file_mtime_ns" not in columns:
                     self._conn.execute("ALTER TABLE photos ADD COLUMN file_mtime_ns INTEGER")
+            if current < 5:
+                self._conn.execute("DROP TRIGGER IF EXISTS invalidate_changed_photo_analysis")
                 self._conn.execute("""
-                    CREATE TRIGGER IF NOT EXISTS invalidate_changed_photo_analysis
+                    CREATE TRIGGER invalidate_changed_photo_analysis
                     AFTER UPDATE OF size_bytes, modified_at, file_mtime_ns ON photos
                     WHEN OLD.size_bytes IS NOT NEW.size_bytes
                       OR OLD.modified_at IS NOT NEW.modified_at
@@ -291,6 +305,14 @@ class PhotoDatabase:
                     BEGIN
                         DELETE FROM photo_quality WHERE path = NEW.path;
                         DELETE FROM photo_person_ai WHERE path = NEW.path;
+                        DELETE FROM photo_sky_ai WHERE path = NEW.path;
+                    END
+                """)
+                self._conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS remove_sky_analysis
+                    AFTER DELETE ON photos
+                    BEGIN
+                        DELETE FROM photo_sky_ai WHERE path = OLD.path;
                     END
                 """)
             if current < 2:
@@ -452,9 +474,15 @@ class PhotoDatabase:
         return removed
 
     def person_results(self, version: str) -> dict[str, bool]:
+        return self._ai_results("photo_person_ai", version)
+
+    def sky_results(self, version: str) -> dict[str, bool]:
+        return self._ai_results("photo_sky_ai", version)
+
+    def _ai_results(self, table: str, version: str) -> dict[str, bool]:
         """Load current suggestions independently of user tags."""
         rows = self._conn.execute(
-            "SELECT a.path, a.detected FROM photo_person_ai a JOIN photos p ON a.path = p.path "
+            f"SELECT a.path, a.detected FROM {table} a JOIN photos p ON a.path = p.path "
             "WHERE a.model_version = ? AND a.file_size = p.size_bytes AND a.file_mtime IS p.modified_at "
             "AND (p.file_mtime_ns IS NULL OR a.file_mtime_ns = p.file_mtime_ns)",
             (version,),
@@ -462,8 +490,14 @@ class PhotoDatabase:
         return {row["path"]: bool(row["detected"]) for row in rows}
 
     def has_person_result(self, info: PhotoInfo, version: str, mtime_ns: int) -> bool:
+        return self._has_ai_result("photo_person_ai", info, version, mtime_ns)
+
+    def has_sky_result(self, info: PhotoInfo, version: str, mtime_ns: int) -> bool:
+        return self._has_ai_result("photo_sky_ai", info, version, mtime_ns)
+
+    def _has_ai_result(self, table: str, info: PhotoInfo, version: str, mtime_ns: int) -> bool:
         return self._conn.execute(
-            "SELECT 1 FROM photo_person_ai WHERE path = ? AND model_version = ? "
+            f"SELECT 1 FROM {table} WHERE path = ? AND model_version = ? "
             "AND file_size = ? AND file_mtime IS ? AND file_mtime_ns = ?",
             (db_key(info.path), version, info.size_bytes, info.modified_at, mtime_ns),
         ).fetchone() is not None
@@ -471,18 +505,32 @@ class PhotoDatabase:
     def save_person_result(
         self, info: PhotoInfo, version: str, mtime_ns: int, detected: bool, margin: float | None
     ) -> bool:
+        return self._save_ai_result("photo_person_ai", "crop_margin", info, version, mtime_ns, detected, margin)
+
+    def save_sky_result(
+        self, info: PhotoInfo, version: str, mtime_ns: int, detected: bool, visible_fraction: float
+    ) -> bool:
+        return self._save_ai_result(
+            "photo_sky_ai", "visible_fraction", info, version, mtime_ns, detected, visible_fraction
+        )
+
+    def _save_ai_result(
+        self, table: str, score_column: str, info: PhotoInfo, version: str,
+        mtime_ns: int, detected: bool, score: float | None,
+    ) -> bool:
         """Save a result only while the matching photo remains in the catalog."""
         with self._conn:
             cursor = self._conn.execute(
-                "INSERT INTO photo_person_ai "
-                "(path, model_version, file_size, file_mtime, file_mtime_ns, detected, crop_margin) "
+                f"INSERT INTO {table} "
+                f"(path, model_version, file_size, file_mtime, file_mtime_ns, detected, {score_column}) "
                 "SELECT path, ?, size_bytes, modified_at, ?, ?, ? FROM photos "
                 "WHERE path = ? AND size_bytes = ? AND modified_at IS ? "
                 "AND (file_mtime_ns IS NULL OR file_mtime_ns = ?) "
                 "ON CONFLICT(path) DO UPDATE SET model_version = excluded.model_version, "
                 "file_size = excluded.file_size, file_mtime = excluded.file_mtime, "
-                "file_mtime_ns = excluded.file_mtime_ns, detected = excluded.detected, crop_margin = excluded.crop_margin",
-                (version, mtime_ns, detected, margin, db_key(info.path), info.size_bytes, info.modified_at, mtime_ns),
+                "file_mtime_ns = excluded.file_mtime_ns, detected = excluded.detected, "
+                f"{score_column} = excluded.{score_column}",
+                (version, mtime_ns, detected, score, db_key(info.path), info.size_bytes, info.modified_at, mtime_ns),
             )
         return cursor.rowcount == 1
 

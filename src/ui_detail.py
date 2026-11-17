@@ -31,7 +31,7 @@ class DetailMixin:
     def set_detail(self, info: PhotoInfo | None) -> None:
         """刷新右侧详情面板。"""
         self.current = info
-        self._fill_person_detail(info)
+        self._fill_ai_detail(info)
         self._draw_preview(info)
         for child in self.rules_frame.winfo_children():
             child.destroy()

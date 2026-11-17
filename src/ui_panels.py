@@ -66,8 +66,6 @@ class PanelsMixin:
         self.btn_analyze.pack(side="left", padx=(0, 12))
         if not PILLOW_AVAILABLE:
             self.btn_analyze.config(state="disabled", fg=TEXT_FAINT)
-        self.btn_person = self._button(bar, "人物 AI", self.start_person_analysis)
-        self.btn_person.pack(side="left", padx=(0, 12))
         tk.Label(
             bar, text="只读扫描 · 不会改动原始文件", bg=WIN_BG, fg=TEXT_FAINT, font=self._font(9)
         ).pack(side="left", padx=(0, 16))
@@ -236,11 +234,12 @@ class PanelsMixin:
         self.btn_manage_tags = self._button(panel, "管理标签…", self.open_tag_manager)
         self.btn_manage_tags.pack(fill="x", padx=16, pady=(6, 2), ipady=1)
 
-        tk.Checkbutton(
-            panel, text="AI 建议 · 人物", variable=self.person_filter, command=self.refresh_results,
-            bg=PANEL_BG, fg=TEXT, activebackground=PANEL_BG, activeforeground=TEXT,
-            selectcolor=INPUT_BG, font=self._font(9),
-        ).pack(anchor="w", padx=16, pady=(6, 0))
+        for label, variable in (("人物", self.person_filter), ("天空", self.sky_filter)):
+            tk.Checkbutton(
+                panel, text=f"AI 建议 · {label}", variable=variable, command=self.refresh_results,
+                bg=PANEL_BG, fg=TEXT, activebackground=PANEL_BG, activeforeground=TEXT,
+                selectcolor=INPUT_BG, font=self._font(9),
+            ).pack(anchor="w", padx=16, pady=(6, 0))
 
         logic_row = tk.Frame(panel, bg=PANEL_BG)
         logic_row.pack(fill="x", padx=16, pady=(8, 0))
@@ -316,9 +315,9 @@ class PanelsMixin:
         self.btn_cancel = self._button(self.progress_frame, "取消", self.cancel_scan)
         self.btn_cancel.pack(pady=20, ipady=2)
 
-        # 结果列表
         self.result_frame = tk.Frame(center, bg=WIN_BG)
         self.result_frame.pack(fill="both", expand=True)
+        self._build_selection_bar()
         pages = tk.Frame(self.result_frame, bg=WIN_BG)
         pages.pack(side="bottom", fill="x", padx=8, pady=4)
         self.btn_result_prev = self._button(pages, "上一页", lambda: self.change_result_page(-1))
@@ -327,24 +326,59 @@ class PanelsMixin:
         self.btn_result_next.pack(side="left", padx=(5, 10))
         self.page_status = tk.Label(pages, bg=WIN_BG, fg=TEXT_SUB, font=self._font(9))
         self.page_status.pack(side="left")
-        self._button(pages, "清除选择", self.clear_result_selection).pack(side="right")
         cols = [key for key, *_ in RESULT_COLUMNS]
         self.result_tree = ttk.Treeview(self.result_frame, columns=cols, show="headings")
+        self.result_tree.heading("#0", text="选择")
+        self.result_tree.column("#0", width=54, minwidth=54, stretch=False)
         for key, title, width, anchor in RESULT_COLUMNS:
             self.result_tree.heading(key, text=title)
             self.result_tree.column(key, width=width, anchor=anchor, stretch=(key == "name"))
         vsb = ttk.Scrollbar(self.result_frame, orient="vertical", command=self.result_tree.yview)
-        self.result_tree.configure(yscrollcommand=vsb.set)
+        hsb = ttk.Scrollbar(self.result_frame, orient="horizontal", command=self.result_tree.xview)
+        self.result_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        hsb.pack(side="bottom", fill="x", padx=(0, 8))
         self.result_tree.pack(side="left", fill="both", expand=True, padx=(0, 0))
         vsb.pack(side="left", fill="y", padx=(0, 8))
         self.result_tree.tag_configure("error", foreground=ORANGE)
         self.result_tree.tag_configure("dim", foreground=TEXT_SUB)
         self.result_tree.bind("<<TreeviewSelect>>", self._on_result_select)
+        self.result_tree.bind("<Button-1>", self._on_result_click)
+        for click in ("Button-1", "Double-Button-1"):
+            self.result_tree.bind(f"<Control-{click}>", lambda event: self._on_result_click(event, toggle=True))
+            self.result_tree.bind(f"<Shift-{click}>", lambda event: self._on_result_click(event, extend=True))
+        self.result_tree.bind("<space>", self._on_result_space)
         self.result_tree.bind("<Double-1>", self._on_result_double_click)
         self.result_tree.bind("<Button-3>", self._show_result_menu)
         self.result_tree.bind("<Delete>", self._on_delete_key)
         self.result_tree.bind("<p>", self._on_pick_key)
         self.result_tree.bind("<P>", self._on_pick_key)
+
+    def _build_selection_bar(self) -> None:
+        bar = tk.Frame(self.result_frame, bg=PANEL_BG)
+        bar.pack(side="top", fill="x", pady=(0, 6))
+        self.btn_select_results = self._button(bar, "选择照片", self.start_result_selection)
+        self.btn_select_results.pack(side="left", padx=8, pady=5)
+        self.selection_actions = tk.Frame(bar, bg=PANEL_BG)
+        self.selection_count = tk.Label(self.selection_actions, bg=PANEL_BG, fg=TEXT, font=self._font(10, bold=True))
+        self.selection_count.pack(side="left", padx=(12, 10))
+        self.btn_select_page = self._button(
+            self.selection_actions, "全选本页", self.toggle_result_page_selection, width=12,
+        )
+        self.btn_select_page.pack(side="left", padx=(0, 6), pady=5)
+        self.btn_cancel_selection = self._button(self.selection_actions, "取消选择", self.cancel_result_selection)
+        self.btn_cancel_selection.pack(side="right", padx=(0, 8), pady=5)
+        self.btn_ai = tk.Menubutton(
+            self.selection_actions, text="AI 分析 ▾", font=self._font(10, bold=True),
+            bg=ACCENT, fg="#ffffff", disabledforeground=TEXT_FAINT,
+            activebackground=ACCENT_DIM, activeforeground="#ffffff",
+            relief="flat", bd=0, padx=14, pady=5, takefocus=True,
+        )
+        self.ai_menu = tk.Menu(self.btn_ai, tearoff=0, bg=CARD_BG, fg=TEXT, activebackground=ACCENT_DIM)
+        self.ai_menu.add_command(label="人物", command=self.start_person_analysis)
+        self.ai_menu.add_command(label="天空", command=self.start_sky_analysis)
+        self.ai_menu.add_command(label="人物和天空", command=self.start_people_and_sky_analysis)
+        self.btn_ai.configure(menu=self.ai_menu)
+        self.btn_ai.pack(side="right", padx=(6, 8), pady=5)
 
     # ------------------------------------------------------------------ #
     # 右侧：详情面板
@@ -413,7 +447,10 @@ class PanelsMixin:
 
         self.detail_meta = tk.Label(content, text="", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(8))
         self.detail_meta.pack(fill="x", padx=18, pady=(4, 8))
-        self.person_detail = tk.Label(content, text="", bg=PANEL_BG, anchor="w", font=self._font(9, bold=True))
+        self.ai_details = {
+            label: tk.Label(content, text="", bg=PANEL_BG, anchor="w", font=self._font(9, bold=True))
+            for label in ("人物", "天空")
+        }
         tk.Frame(content, bg=BORDER_SOFT, height=1).pack(fill="x", padx=18)
 
         self.detail_rows = tk.Frame(content, bg=PANEL_BG)

@@ -64,8 +64,8 @@ def seeded_app(root, db_path: Path):
     return app
 
 
-def test_person_analysis_filters_and_persists_selected_photos(root, db_path, tmp_path, monkeypatch) -> None:
-    import src.ui_person as person_ui
+def test_combined_ai_analysis_uses_the_same_checked_photos(root, db_path, tmp_path, monkeypatch) -> None:
+    import src.ui_ai as ai_ui
     from src.database import PhotoDatabase
     from src.exif_reader import read_photo_info
     from src.person_ai import MODEL_VERSION, PersonResult
@@ -77,29 +77,44 @@ def test_person_analysis_filters_and_persists_selected_photos(root, db_path, tmp
         path.write_bytes(b"fixture")
     paths = [str(path.resolve()) for path in files]
     infos = [read_photo_info(path, "jpeg") for path in files]
-    real_batch = person_ui.analyze_selection
+    real_batch = ai_ui.analyze_person_selection
     seen = []
+    sky_seen = []
 
     class Detector:
         def analyze(self, info):
             seen.append(info.file_name)
             return PersonResult(info.file_name == "person.jpg", 0.1)
 
-    monkeypatch.setattr(person_ui, "analyze_selection",
+    monkeypatch.setattr(ai_ui, "analyze_person_selection",
                         lambda *args, **kwargs: real_batch(*args, **kwargs, make_analyzer=Detector))
+
+    def sky_analysis(infos, db, *, progress, cancelled):
+        sky_seen.extend(str(info.path) for info in infos)
+        return len(infos), 0, 0, None
+
+    monkeypatch.setattr(ai_ui, "analyze_sky_selection", sky_analysis)
     app = PhotoClassifierApp(root, db_path)
     try:
         app.db.add_folder(library)
         app.db.upsert_many(infos)
         app.refresh_results()
-        app.result_tree.selection_set(paths[:2])
-        app.start_person_analysis()
+        app.start_result_selection()
+        app._select_result_row(paths[0])
+        app._select_result_row(paths[1])
+        app._select_result_row(paths[2])
+        app._select_result_row(paths[2])
+        app.ai_menu.invoke(2)
         deadline = time.monotonic() + 5
-        while app.person_thread is not None and time.monotonic() < deadline:
+        while app.ai_thread is not None and time.monotonic() < deadline:
             root.update()
             time.sleep(0.01)
-        assert app.person_thread is None
+        assert app.ai_thread is None
         assert set(seen) == {"person.jpg", "landscape.jpg"}
+        assert set(sky_seen) == set(paths[:2])
+        assert set(app.result_tree.selection()) == set(paths[:2])
+        assert str(app.current.path) == paths[2]
+        assert app.selection_count["text"] == "已选 2 张"
         assert app.person_results == {paths[0]: True, paths[1]: False}
         assert "AI · 人物" in app.result_tree.item(paths[0], "values")[6]
         app.person_filter.set(True)
@@ -119,6 +134,223 @@ def test_person_analysis_filters_and_persists_selected_photos(root, db_path, tmp
         app.db.close()
 
 
+def test_sky_analysis_combines_with_person_filter_and_reuses_results(root, db_path, tmp_path, monkeypatch):
+    from src import ui_ai
+    from src.database import PhotoDatabase
+    from src.exif_reader import read_photo_info
+    from src.person_ai import MODEL_VERSION as PERSON_VERSION
+    from src.sky_ai import MODEL_VERSION, SkyResult, analyze_selection
+
+    files = [tmp_path / name for name in ("both.jpg", "sky.jpg", "person.jpg", "unselected.jpg")]
+    for path in files:
+        path.write_bytes(b"fixture")
+    infos = [read_photo_info(path, "jpeg") for path in files]
+    both, sky, person, unselected = [str(info.path) for info in infos]
+    seen = []
+
+    class Detector:
+        def analyze(self, info):
+            seen.append(info.file_name)
+            detected = info.file_name in {"both.jpg", "sky.jpg"}
+            return SkyResult(detected, 0.6 if detected else 0.1)
+
+    monkeypatch.setattr(ui_ai, "analyze_sky_selection",
+                        lambda *args, **kwargs: analyze_selection(*args, **kwargs, make_analyzer=Detector))
+    app = PhotoClassifierApp(root, db_path)
+    try:
+        app.db.add_folder(tmp_path)
+        app.db.upsert_many(infos)
+        for info in (infos[0], infos[2]):
+            assert app.db.save_person_result(info, PERSON_VERSION, info.file_mtime_ns, True, 0.1)
+        app.refresh_results()
+        app.start_result_selection()
+        app.btn_select_page.invoke()
+        app._select_result_row(unselected)
+        for _ in range(2):
+            app.ai_menu.invoke(1)
+            assert app.btn_scan["state"] == "disabled"
+            deadline = time.monotonic() + 5
+            while app.ai_thread is not None and time.monotonic() < deadline:
+                root.update()
+                time.sleep(0.01)
+            assert app.ai_thread is None
+        assert sorted(seen) == ["both.jpg", "person.jpg", "sky.jpg"]
+        assert app.sky_results == {both: True, sky: True, person: False}
+        assert "AI · 人物 · 天空" in app.result_tree.item(both, "values")[6]
+        app.set_detail(infos[0])
+        assert app.ai_details["天空"]["text"] == "AI 建议 · 天空"
+        app.sky_filter.set(True)
+        app.refresh_results()
+        assert set(app.result_tree.get_children()) == {both, sky}
+        app.person_filter.set(True)
+        app.refresh_results()
+        assert app.result_tree.get_children() == (both,)
+        app.and_mode.set(False)
+        app.refresh_results()
+        assert set(app.result_tree.get_children()) == {both, sky, person}
+        app.clear_filters()
+        assert set(app.result_tree.get_children()) == {both, sky, person, unselected}
+        with PhotoDatabase.open(db_path) as reopened:
+            assert reopened.sky_results(MODEL_VERSION) == app.sky_results
+            assert reopened.remove_photos([files[0]]) == 1
+            reopened.upsert_photo(infos[0])
+            assert both not in reopened.sky_results(MODEL_VERSION)
+        assert all(path.read_bytes() == b"fixture" for path in files)
+    finally:
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
+def test_selection_mode_toggles_rows_and_cancels_across_pages(root, db_path, tmp_path, monkeypatch):
+    monkeypatch.setattr(gui, "RESULT_PAGE_SIZE", 2)
+    app = PhotoClassifierApp(root, db_path)
+    try:
+        app.db.add_folder(tmp_path)
+        app.db.upsert_many([
+            make_info(tmp_path / "a.jpg", category="jpeg"),
+            make_info(tmp_path / "b.jpg", category="jpeg", iso=6400),
+            make_info(tmp_path / "c.jpg", category="jpeg"),
+            make_info(tmp_path / "d.mp4", category="video"),
+        ])
+        app.refresh_results()
+        root.deiconify()
+        root.update()
+        tree = app.result_tree
+        first, second = tree.get_children()
+        assert app.status_left.winfo_viewable()
+        click_time = 0
+
+        def click(iid, column, *, delay=1000):
+            nonlocal click_time
+            click_time += delay
+            x, y, width, height = tree.bbox(iid, column)
+            event = dict(x=x + width // 2, y=y + height // 2, time=click_time)
+            tree.event_generate("<ButtonPress-1>", **event)
+            tree.event_generate("<ButtonRelease-1>", **event)
+            root.update()
+
+        click(second, "name")
+        assert str(app.current.path) == second
+        assert not app._selecting_results
+        assert app._selected_iids == set()
+        app.btn_select_results.invoke()
+        root.update()
+        assert tree.selection() == ()
+        assert app.btn_ai["state"] == "disabled"
+        click(first, "name")
+        assert tree.item(first, "text") == "☑"
+        assert tree.selection() == (first,)
+        click(first, "name", delay=50)
+        assert tree.item(first, "text") == "☐"
+        click(first, "name")
+        click(first, "#0")
+        assert tree.item(first, "text") == "☐"
+        assert tree.selection() == ()
+        click(first, "#0")
+        app.change_result_page(1)
+        third, video = tree.get_children()
+        app.btn_select_page.invoke()
+        assert app._selected_iids == {first, third, video}
+        assert app.selection_count["text"] == "已选 3 张"
+        assert "2 张" in app.btn_ai["text"]
+        app.btn_select_page.invoke()
+        assert app._selected_iids == {first}
+        click(third, "name")
+        app.btn_pick.invoke()
+        picked = app.tag_controller.get_by_name(PICK_TAG_NAME)
+        assert app.tag_controller.tag_counts[picked.id] == 2
+        assert app._selected_iids == {first, third}
+        app.btn_cancel_selection.invoke()
+        assert not app._selecting_results
+        assert tree.selection() == ()
+        assert tree.item(third, "text") == "☐"
+        assert str(app.current.path) == third
+        app.change_result_page(-1)
+        app.btn_select_results.invoke()
+        assert tree.item(first, "text") == "☐"
+        assert app._selected_iids == set()
+        app.btn_select_page.invoke()
+        app.rule_vars["high_iso"].set(True)
+        app._on_filter_changed()
+        assert app._selected_iids == {second}
+    finally:
+        root.withdraw()
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
+def test_ctrl_and_shift_click_update_ai_checks_and_row_selection(root, db_path, tmp_path, monkeypatch):
+    monkeypatch.setattr(gui, "RESULT_PAGE_SIZE", 4)
+    app = PhotoClassifierApp(root, db_path)
+    try:
+        app.db.add_folder(tmp_path)
+        app.db.upsert_many([
+            make_info(tmp_path / "a.jpg", category="jpeg"),
+            make_info(tmp_path / "b.mp4", category="video"),
+            make_info(tmp_path / "c.jpg", category="jpeg"),
+            make_info(tmp_path / "d.jpg", category="jpeg"),
+            make_info(tmp_path / "e.jpg", category="jpeg"),
+        ])
+        app.refresh_results()
+        root.deiconify()
+        root.update()
+        tree = app.result_tree
+        first, video, third, last = tree.get_children()
+        click_time = 0
+
+        def click(iid, modifiers=0, column="name"):
+            nonlocal click_time
+            click_time += 1000
+            x, y, width, height = tree.bbox(iid, column)
+            event = dict(x=x + width // 2, y=y + height // 2, state=modifiers, time=click_time)
+            tree.event_generate("<ButtonPress-1>", **event)
+            tree.event_generate("<ButtonRelease-1>", **event)
+            root.update()
+
+        click(first)
+        assert app._selected_iids == set()
+        click(third, modifiers=0x4)  # Ctrl
+        assert app._selected_iids == {first, third}
+        assert tree.selection() == (first, third)
+        click(third, modifiers=0x4, column="#0")
+        assert app._selected_iids == {first}
+        assert tree.item(third, "text") == "☐"
+
+        app.change_result_page(1)
+        other_page = tree.get_children()[0]
+        app.btn_select_page.invoke()
+        app.change_result_page(-1)
+        root.update()
+        click(first)
+        click(last, modifiers=0x1)  # Shift
+        assert app._selected_iids == {first, video, third, last, other_page}
+        assert tree.selection() == (first, video, third, last)
+        assert tree.item(video, "text") == "☑"
+        assert app.selection_count["text"] == "已选 5 张"
+        click(third, modifiers=0x1)
+        assert app._selected_iids == {first, video, third, other_page}
+        assert tree.selection() == (first, video, third)
+        assert app.btn_ai["state"] == "normal"
+        tree.focus_force()
+        root.update()
+        tree.event_generate("<Escape>")
+        root.update()
+        assert not app._selecting_results
+        assert app._selected_iids == set()
+        assert tree.selection() == ()
+        assert tree.focus() == ""
+        click(last, modifiers=0x4)
+        assert app._selected_iids == {last}
+        assert tree.selection() == (last,)
+    finally:
+        root.withdraw()
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
 def test_large_library_filters_before_paging_and_keeps_cross_page_selection(root, db_path, tmp_path):
     app = PhotoClassifierApp(root, db_path)
     try:
@@ -133,10 +365,11 @@ def test_large_library_filters_before_paging_and_keeps_cross_page_selection(root
         app.refresh_results()
         assert len(app._matched_iids) == 20010
         first = app.result_tree.get_children()[0]
-        app.result_tree.selection_set(first)
+        app.start_result_selection()
+        app._select_result_row(first)
         app.change_result_page(1)
         second = app.result_tree.get_children()[0]
-        app.result_tree.selection_set(second)
+        app._select_result_row(second)
         assert {str(info.path) for info in app._selected_infos()} == {first, second}
         app.rule_vars["high_iso"].set(True)
         app._on_filter_changed()
