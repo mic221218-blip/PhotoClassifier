@@ -22,10 +22,6 @@ WizardStyle=modern
 Compression=lzma2
 SolidCompression=yes
 
-[Languages]
-Name: "en"; MessagesFile: "compiler:Default.isl"
-Name: "zhcn"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
-
 [Files]
 Source: ".dsh_work\release\dist\PhotoClassifier\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 

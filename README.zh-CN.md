@@ -16,7 +16,7 @@ Lightroom 等后期软件。
 ## Windows 安装
 
 1. 在 Windows 10 或 11（x64）上，从 [GitHub Releases](https://github.com/mic221218-blip/PhotoClassifier/releases/latest) 下载 `PhotoClassifier-Setup-x64.exe`。
-2. 双击安装包，按向导完成安装。安装包已包含 Python 和运行依赖，默认仅为当前 Windows 用户安装。
+2. 双击安装包，按向导选择 **Next → Install → Finish**。安装包已包含 Python 和运行依赖，默认仅为当前 Windows 用户安装。
 3. 从开始菜单打开 **PhotoClassifier**。在左侧加入照片文件夹，再点 **开始扫描**。
 
 安装包尚未签名。如果 Windows 显示 SmartScreen 提示，确认文件来自上述 GitHub Release 后，可以选择 **更多信息 → 仍要运行**。
