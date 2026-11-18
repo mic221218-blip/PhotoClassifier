@@ -202,6 +202,63 @@ def test_sky_analysis_combines_with_person_filter_and_reuses_results(root, db_pa
         app.db.close()
 
 
+def test_scene_subjects_rank_before_pagination_and_keep_unranked_detections(root, db_path, tmp_path, monkeypatch):
+    from src import scene_ai, ui_ai
+    from src.exif_reader import read_photo_info
+    from src.person_ai import MODEL_VERSION as PERSON_VERSION
+    from src.scene_ai import Role
+
+    scenes = {"a.jpg": {"building": Role.PRIMARY, "person": Role.BACKGROUND},
+              "b.jpg": {"city": Role.PRIMARY, "person": Role.SECONDARY},
+              "c.jpg": {"person": Role.PRIMARY, "flowers": Role.PRIMARY}, "d.jpg": {}}
+
+    class Analyzer:
+        def analyze(self, info):
+            return scenes[info.file_name]
+
+    monkeypatch.setattr(ui_ai, "analyze_scene_selection",
+                        lambda *a, **kw: scene_ai.analyze_selection(*a, **kw, make_analyzer=Analyzer))
+    app = PhotoClassifierApp(root, db_path)
+    try:
+        infos = []
+        for name in (*scenes, "legacy.jpg"):
+            path = tmp_path / name
+            path.write_bytes(b"fixture")
+            infos.append(read_photo_info(path, "jpeg"))
+        paths = [str(info.path) for info in infos]
+        app.db.add_folder(tmp_path)
+        app.db.upsert_many(infos)
+        for info in infos[3:]:
+            app.db.save_person_result(info, PERSON_VERSION, info.file_mtime_ns, True, .1)
+        app.refresh_results()
+        app.start_result_selection()
+        app.btn_select_page.invoke()
+        app._select_result_row(paths[-1])
+        app.ai_menu.invoke("六类题材主次")
+        deadline = time.monotonic() + 5
+        while app.ai_thread is not None and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        assert app.ai_thread is None
+        monkeypatch.setattr(gui, "RESULT_PAGE_SIZE", 2)
+        app.ai_filters["person"].set(True)
+        app.refresh_results()
+        assert app._matched_iids == [paths[2], paths[1], paths[0], paths[4]]
+        assert app.result_tree.get_children() == (paths[2], paths[1])
+        app.set_detail(infos[0])
+        assert "建筑" in app.scene_details[Role.PRIMARY]["text"]
+        assert "人物" in app.scene_details[Role.BACKGROUND]["text"]
+        app.ai_filters["flowers"].set(True)
+        app.refresh_results()
+        assert app.result_tree.get_children() == (paths[2],)
+        app.clear_filters()
+        assert len(app._matched_iids) == 5
+    finally:
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
 def test_selection_mode_toggles_rows_and_cancels_across_pages(root, db_path, tmp_path, monkeypatch):
     monkeypatch.setattr(gui, "RESULT_PAGE_SIZE", 2)
     app = PhotoClassifierApp(root, db_path)

@@ -7,6 +7,7 @@ from tkinter import ttk
 
 from src.quality import FLAG_IDS, FLAG_LABELS
 from src.rules import RULE_REGISTRY
+from src.scene_ai import ROLE_NAMES, SUBJECTS, Role
 from src.ui_gallery import PhotoGallery
 from src.ui_theme import (
     ACCENT,
@@ -250,9 +251,9 @@ class PanelsMixin:
         self.btn_manage_tags = self._button(panel, "管理标签…", self.open_tag_manager)
         self.btn_manage_tags.pack(fill="x", padx=16, pady=(6, 2), ipady=1)
 
-        for label, variable in (("人物", self.person_filter), ("天空", self.sky_filter)):
+        for key, variable in self.ai_filters.items():
             tk.Checkbutton(
-                panel, text=f"AI 建议 · {label}", variable=variable, command=self.refresh_results,
+                panel, text=f"AI 建议 · {SUBJECTS[key]}", variable=variable, command=self.refresh_results,
                 bg=PANEL_BG, fg=TEXT, activebackground=PANEL_BG, activeforeground=TEXT,
                 selectcolor=INPUT_BG, font=self._font(9),
             ).pack(anchor="w", padx=16, pady=(6, 0))
@@ -440,6 +441,7 @@ class PanelsMixin:
         self.ai_menu.add_command(label="人物", command=self.start_person_analysis)
         self.ai_menu.add_command(label="天空", command=self.start_sky_analysis)
         self.ai_menu.add_command(label="人物和天空", command=self.start_people_and_sky_analysis)
+        self.ai_menu.add_command(label="六类题材主次", command=self.start_scene_analysis)
 
     # ------------------------------------------------------------------ #
     # 右侧：详情面板
@@ -507,6 +509,11 @@ class PanelsMixin:
         self.ai_details = {
             label: tk.Label(content, text="", bg=PANEL_BG, anchor="w", font=self._font(9, bold=True))
             for label in ("人物", "天空")
+        }
+        self.scene_details = {
+            role: tk.Label(content, bg=PANEL_BG, anchor="w", fg=ACCENT if role == Role.PRIMARY else TEXT_SUB,
+                           font=self._font(9, bold=role == Role.PRIMARY))
+            for role in ROLE_NAMES
         }
         tk.Frame(content, bg=BORDER_SOFT, height=1).pack(fill="x", padx=18)
 

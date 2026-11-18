@@ -28,6 +28,7 @@ from src.quality_sort import SORT_DEFAULT, SORT_SHARPNESS, sharpness_key, sharpn
 from src.quality_store import QualityStore
 from src.rules import RULE_REGISTRY, RuleEngine, RuleMatch
 from src.sky_ai import MODEL_VERSION as SKY_MODEL_VERSION
+from src.scene_ai import MODEL_VERSION as SCENE_MODEL_VERSION, ROLE_NAMES, SUBJECTS, Role
 from src.tag_controller import TagController
 from src.tag_store import Tag, TagStore
 from src.timelapse import TimelapseStack, detect_timelapse
@@ -645,6 +646,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._rule_cache = {}
         self.person_results = self.db.person_results(PERSON_MODEL_VERSION)
         self.sky_results = self.db.sky_results(SKY_MODEL_VERSION)
+        self.scene_results = self.db.scene_results(SCENE_MODEL_VERSION)
         self._ensure_quality_cache(photos, skip_duplicates=skip_duplicate_rebuild)
         self._ensure_tag_cache()
         if self.sort_mode == SORT_SHARPNESS:
@@ -675,6 +677,9 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self.matches_by_iid[iid] = matches
             self.quality_by_iid[iid] = quality_flags
             self._matched_iids.append(iid)
+        selected_ai = selected_filters.selected_ai
+        if selected_ai:
+            self._matched_iids.sort(key=lambda iid: self._ai_sort_key(iid, selected_ai), reverse=True)
         if self._quick_filter == "duplicates":
             self._matched_iids.sort(key=lambda iid: self.duplicates.by_path[iid].group_id)
         self._refresh_result_rows()
@@ -813,9 +818,11 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             if user_tags:
                 user_text = " · ".join(f"★{tag.name}" for tag in user_tags)
                 labels = f"{user_text} ｜ {labels}" if labels else user_text
-            ai_tags = [name for name, hit in (("人物", self.has_ai_person(info)), ("天空", self.has_ai_sky(info))) if hit]
-            if ai_tags:
-                ai_text = "AI · " + " · ".join(ai_tags)
+            roles = self._ai_roles(iid)
+            top_role = max(roles.values(), default=0)
+            if roles:
+                ai_tags = [SUBJECTS[key] for key, value in roles.items() if value == top_role]
+                ai_text = f"{ROLE_NAMES.get(top_role, 'AI')} · " + " · ".join(ai_tags)
                 labels = f"{labels} ｜ {ai_text}" if labels else ai_text
             measurement = self.measurements_by_path.get(str(info.path))
             quality_text = " · ".join(
@@ -826,6 +833,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
                 status = f"重复组 {self.duplicates.by_path[iid].group_id}"
             if info.exif_status == EXIF_ERROR:
                 status = status or "读取失败"
+            if not status and top_role == Role.PRIMARY:
+                status = "、".join(ai_tags)
             gallery_photos.append(GalleryPhoto(
                 info, picked_tag is not None and any(tag.id == picked_tag.id for tag in user_tags), status,
             ))
@@ -1055,8 +1064,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             raw_only=self.raw_only.get(),
             gps_only=self.gps_only.get(),
             quality_ok=self.quality_ok_var.get(),
-            ai_person_only=self.person_filter.get(),
-            ai_sky_only=self.sky_filter.get(),
+            ai_ids=frozenset(key for key, var in self.ai_filters.items() if var.get()),
         )
 
     def _passes_filter(
@@ -1076,8 +1084,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             quality_hits=quality_hits,
             tag_hits={tag.id for tag in (user_tags or [])},
             selection=selection,
-            ai_person=self.has_ai_person(info),
-            ai_sky=self.has_ai_sky(info),
+            ai_hits=self._ai_roles(str(info.path)) if selection.selected_ai else (),
         )
 
     def _on_quality_flag_changed(self) -> None:
@@ -1129,8 +1136,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
                 *((FLAG_LABELS[key], var) for key, var in self.quality_vars.items()),
                 ("有 GPS", self.gps_only),
                 ("质量正常", self.quality_ok_var),
-                ("AI 人物", self.person_filter),
-                ("AI 天空", self.sky_filter),
+                *((f"AI {SUBJECTS[key]}", var) for key, var in self.ai_filters.items()),
             )
             if var.get()
         ]
@@ -1177,8 +1183,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self.raw_only.set(False)
         self.gps_only.set(False)
         self.quality_ok_var.set(False)
-        self.person_filter.set(False)
-        self.sky_filter.set(False)
+        for var in self.ai_filters.values():
+            var.set(False)
         self.active_rules = set()
         self.active_quality = set()
         self.active_tags = set()

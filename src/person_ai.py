@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.ai_analysis import analyze_batch
+from src.clip_encoder import ClipEncoder
 from src.paths import model_directories
 from src.photo_info import PhotoInfo
 from src.preview import load_color_preview
@@ -57,7 +58,6 @@ class PersonAnalyzer:
             import numpy as np
             import onnxruntime as ort
             from PIL import Image, ImageOps
-            from tokenizers import Tokenizer
         except ImportError as exc:
             raise RuntimeError("请安装人物分析的可选依赖（requirements-ai.txt）。") from exc
         self.np = np
@@ -68,24 +68,16 @@ class PersonAnalyzer:
         options.intra_op_num_threads = 4
         options.inter_op_num_threads = 1
         providers = ["CPUExecutionProvider"]
-        detector, vision, text, tokenizer_data = (weights / name for name in MODEL_PATHS)
-        self.detector = ort.InferenceSession(str(detector), options, providers=providers)
-        self.vision = ort.InferenceSession(str(vision), options, providers=providers)
-        text_session = ort.InferenceSession(str(text), options, providers=providers)
+        self.detector = ort.InferenceSession(str(weights / MODEL_PATHS[0]), options, providers=providers)
+        try:
+            self.clip = ClipEncoder(weights, options)
+        except ImportError as exc:
+            raise RuntimeError("请安装人物分析的可选依赖（requirements-ai.txt）。") from exc
         detector_input = self.detector.get_inputs()[0]
         if detector_input.shape[-2:] != [416, 416]:
             raise ValueError("人物检测模型的输入尺寸不匹配")
         self.detector_input = detector_input.name
-        self.vision_input = self.vision.get_inputs()[0].name
-        tokenizer = Tokenizer.from_file(str(tokenizer_data))
-        tokenizer.enable_truncation(max_length=77)
-        tokenizer.enable_padding(length=77)
-        encodings = tokenizer.encode_batch(list(PERSON_PROMPTS + OTHER_PROMPTS))
-        tokens = np.asarray([item.ids for item in encodings], dtype=np.int64)
-        vectors = text_session.run(None, {text_session.get_inputs()[0].name: tokens})[0]
-        self.embeddings = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
-        self.mean = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
-        self.std = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
+        self.embeddings = self.clip.text_vectors(PERSON_PROMPTS + OTHER_PROMPTS)
         grids, strides = [], []
         for stride in (8, 16, 32):
             cells = 416 // stride
@@ -95,7 +87,9 @@ class PersonAnalyzer:
         self.grid, self.strides = np.concatenate(grids), np.concatenate(strides)
 
     def analyze(self, info: PhotoInfo) -> PersonResult:
-        image = load_color_preview(info)
+        return self.analyze_image(load_color_preview(info))
+
+    def analyze_image(self, image) -> PersonResult:
         best = None
         for crop in self._person_crops(image):
             margin = self._crop_margin(crop)
@@ -149,10 +143,7 @@ class PersonAnalyzer:
     def _crop_margin(self, crop) -> float:
         np = self.np
         thumbnail = self.image_ops.pad(crop, (224, 224), method=self.image.Resampling.BICUBIC, color=(114, 114, 114))
-        pixels = (np.asarray(thumbnail, dtype=np.float32) / 255.0 - self.mean) / self.std
-        tensor = np.ascontiguousarray(pixels.transpose(2, 0, 1)[None])
-        vector = self.vision.run(None, {self.vision_input: tensor})[0][0]
-        similarities = self.embeddings @ (vector / np.linalg.norm(vector))
+        similarities = self.embeddings @ self.clip.image_vector(thumbnail)
         if not np.isfinite(similarities).all():
             raise ValueError("人物复核结果无效")
         positives, negatives = np.split(similarities, [len(PERSON_PROMPTS)])

@@ -10,28 +10,55 @@ from src.database import PhotoDatabase
 from src.person_ai import analyze_selection as analyze_person_selection
 from src.photo_info import PhotoInfo
 from src.preview import is_supported
+from src.scene_ai import ROLE_NAMES, SUBJECTS, Role, analyze_selection as analyze_scene_selection
 from src.sky_ai import analyze_selection as analyze_sky_selection
 from src.ui_theme import ACCENT, INPUT_BG, TEXT_FAINT
 
 
 class AIAnalysisMixin:
     def _init_ai_analysis(self) -> None:
-        self.person_filter = tk.BooleanVar(value=False)
-        self.sky_filter = tk.BooleanVar(value=False)
+        self.ai_filters = {key: tk.BooleanVar(value=False) for key in SUBJECTS}
+        self.person_filter = self.ai_filters["person"]
+        self.sky_filter = self.ai_filters["sky"]
         self.person_results: dict[str, bool] = {}
         self.sky_results: dict[str, bool] = {}
+        self.scene_results: dict[str, dict[str, int]] = {}
         self.ai_thread: threading.Thread | None = None
         self.ai_cancel = threading.Event()
         self.ai_queue: queue.Queue = queue.Queue()
 
-    def has_ai_person(self, info: PhotoInfo) -> bool:
-        return self.person_results.get(str(info.path), False)
+    def _ai_roles(self, iid: str) -> dict[str, int]:
+        roles = self.scene_results.get(iid)
+        if roles is not None:
+            return roles
+        return {key: 0 for key, results in (("person", self.person_results), ("sky", self.sky_results))
+                if results.get(iid)}
 
-    def has_ai_sky(self, info: PhotoInfo) -> bool:
-        return self.sky_results.get(str(info.path), False)
+    def _ai_sort_key(self, iid: str, selected):
+        roles = self._ai_roles(iid)
+        # Unranked legacy detections follow background matches. Stable sorting
+        # preserves the requested sharpness or catalog order within equal roles.
+        counts = [0, 0, 0, 0]
+        for key in selected.intersection(roles):
+            counts[roles[key]] += 1
+        return counts[::-1]
 
     def _fill_ai_detail(self, info: PhotoInfo | None) -> None:
         anchor = self.detail_meta
+        roles = self.scene_results.get(str(info.path)) if info is not None else None
+        for label in self.scene_details.values():
+            label.pack_forget()
+        if roles is not None:
+            for label in self.ai_details.values():
+                label.pack_forget()
+            for role, title in ROLE_NAMES.items():
+                names = [SUBJECTS[key] for key, value in roles.items() if value == role]
+                if names or (not roles and role == Role.PRIMARY):
+                    label = self.scene_details[role]
+                    label.config(text=f"{title} · {'、'.join(names)}" if names else "六类题材均无明显命中")
+                    label.pack(fill="x", padx=18, pady=(5, 2), after=anchor)
+                    anchor = label
+            return
         for name, results in (("人物", self.person_results), ("天空", self.sky_results)):
             detail = self.ai_details[name]
             result = results.get(str(info.path)) if info is not None else None
@@ -58,6 +85,9 @@ class AIAnalysisMixin:
 
     def start_people_and_sky_analysis(self) -> None:
         self._start_ai_analysis((("人物", analyze_person_selection), ("天空", analyze_sky_selection)))
+
+    def start_scene_analysis(self) -> None:
+        self._start_ai_analysis((("六类题材主次", analyze_scene_selection),))
 
     def _start_ai_analysis(self, analyses) -> None:
         if not self._selecting_results or any(

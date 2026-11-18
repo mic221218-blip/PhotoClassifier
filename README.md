@@ -227,15 +227,17 @@ presented and filtered through the same layer.
 
 Use a thumbnail checkbox or enter multi-select mode with **多选**. You can also Ctrl-click to toggle a photo or Shift-click to select a range on the current page. Selections carry across pages, and **全选本页** selects the current page. Click **清除选择** or press Escape to return to browsing. When filters change, matching photos stay selected.
 
-Choose people, sky, or both from **AI 分析**. If the selection contains unsupported files such as videos, the button displays the number of photos it can analyze.
+Choose **AI 分析 → 六类题材主次** to analyze people, sky, architecture, city, flowers and natural landscapes together. Whole-frame content, visible area, position and local detail determine each subject's role. A photo can have two main subjects. The original people, sky and combined checks are also available.
 
-Use **AI 建议** under **筛选** or inspect individual suggestions in the details pane. A photo can receive both suggestions. Suggestions are stored in the local catalog separately from manual tags. Canceling keeps completed results. JPEG, PNG, and NEF files with embedded previews are supported.
+Under **筛选 → AI 建议**, select a subject to see main subjects first, followed by secondary and background matches. Ties follow the current sort order. The details pane shows all assigned roles. Multiple filters support AND and OR. Legacy detections follow ranked matches until the six-subject analysis is run for that photo. Results are stored in the local catalog separately from manual tags. Canceling keeps completed results. JPEG, PNG, and NEF files with embedded previews are supported.
 
 **扫描新文件** reuses records with matching file sizes and modification times. Use **更多 → 全量重扫** or the CLI option `scan --full` to reread files in scope.
 
 This feature uses the optional dependencies in `requirements-ai.txt` and local YOLOX-Tiny and CLIP ViT-B/32 int8 weights under `models/`. An existing cache with the same structure under `.dsh_work/models/` also works. The four relative paths are `yolox_tiny.onnx`, `clip/int8/vision_model_int8.onnx`, `clip/int8/text_model_int8.onnx`, and `clip/tokenizer.json`.
 
 The sky preview uses the same optional dependencies and loads the evaluated SegFormer-B0 ONNX weights from `models/segformer-b0/model.onnx` or the same relative path under `.dsh_work/models/`. The upstream license covers research and evaluation. [Model file](https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-512/blob/main/onnx/model.onnx) · [Upstream license](https://github.com/NVlabs/SegFormer/blob/master/LICENSE)
+
+The six-subject analysis uses both sets of model files. Run it once on previously analyzed photos to assign roles.
 
 Requirements: Python 3.12+. Core features use the standard library only;
 **image quality analysis needs the optional Pillow**:

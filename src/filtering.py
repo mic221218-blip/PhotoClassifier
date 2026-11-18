@@ -27,6 +27,16 @@ class FilterSelection:
     ai_person_only: bool = False
     ai_sky_only: bool = False
     raw_only: bool = False
+    ai_ids: frozenset[str] = frozenset()
+
+    @property
+    def selected_ai(self) -> frozenset[str]:
+        ids = self.ai_ids
+        if self.ai_person_only:
+            ids = ids.union(("person",))
+        if self.ai_sky_only:
+            ids = ids.union(("sky",))
+        return ids
 
     @property
     def selected_count(self) -> int:
@@ -35,8 +45,7 @@ class FilterSelection:
             + len(self.quality_ids)
             + len(self.tag_ids)
             + int(self.quality_ok)
-            + int(self.ai_person_only)
-            + int(self.ai_sky_only)
+            + len(self.selected_ai)
             + int(self.raw_only)
         )
 
@@ -56,6 +65,7 @@ class FilterSelection:
         ai_person_only: bool | None = None,
         ai_sky_only: bool | None = None,
         raw_only: bool | None = None,
+        ai_ids: Iterable[str] | None = None,
     ) -> "FilterSelection":
         return FilterSelection(
             rule_ids=self.rule_ids if rule_ids is None else frozenset(rule_ids),
@@ -69,6 +79,7 @@ class FilterSelection:
             ai_person_only=self.ai_person_only if ai_person_only is None else bool(ai_person_only),
             ai_sky_only=self.ai_sky_only if ai_sky_only is None else bool(ai_sky_only),
             raw_only=self.raw_only if raw_only is None else bool(raw_only),
+            ai_ids=self.ai_ids if ai_ids is None else frozenset(ai_ids),
         )
 
 
@@ -81,6 +92,7 @@ def matches(
     selection: FilterSelection,
     ai_person: bool = False,
     ai_sky: bool = False,
+    ai_hits: Iterable[str] = (),
 ) -> bool:
     """照片是否满足当前筛选条件。
 
@@ -104,16 +116,14 @@ def matches(
     selected: set[str | int] = set(selection.rule_ids)
     selected.update(selection.quality_ids)
     selected.update(selection.tag_ids)
-    if selection.ai_person_only:
-        selected.add("__ai_person__")
-    if selection.ai_sky_only:
-        selected.add("__ai_sky__")
+    selected.update(f"__ai_{key}__" for key in selection.selected_ai)
     if not selected:
         return True
 
     hits: set[str | int] = set(rule_hits)
     hits.update(quality_hits)
     hits.update(int(tag_id) for tag_id in tag_hits)
+    hits.update(f"__ai_{key}__" for key in ai_hits)
     if ai_person:
         hits.add("__ai_person__")
     if ai_sky:

@@ -58,18 +58,25 @@ class SkyAnalyzer:
 
     def analyze(self, info: PhotoInfo) -> SkyResult:
         image = load_color_preview(info)
+        classes = self.segment(image)
+        sky = self.visible_sky_mask(image, classes)
+        fraction = float(sky.mean())
+        return SkyResult(fraction >= SKY_THRESHOLD, fraction)
+
+    def segment(self, image):
         np = self.np
         model_pixels = np.asarray(image.resize((512, 512), self.bilinear), dtype=np.float32) / 255
         tensor = np.ascontiguousarray(((model_pixels - self.mean) / self.std).transpose(2, 0, 1)[None])
         logits = self.session.run(None, {self.input_name: tensor})[0][0]
         if logits.shape != (150, 128, 128) or not np.isfinite(logits).all():
             raise ValueError("天空分析结果无效")
-        sky = logits.argmax(axis=0) == SKY_CLASS
+        return logits.argmax(axis=0)
+
+    def visible_sky_mask(self, image, classes):
+        np = self.np
         pixels = np.asarray(image.resize((128, 128), self.bilinear), dtype=np.float32) / 255
-        # Exclude near-black and near-white pixels from the segmented sky area.
-        brightness = pixels[sky].mean(axis=1)
-        fraction = float(np.count_nonzero((brightness > 0.12) & (brightness < 0.95)) / sky.size)
-        return SkyResult(fraction >= SKY_THRESHOLD, fraction)
+        brightness = pixels.mean(axis=2)
+        return (classes == SKY_CLASS) & (brightness > 0.12) & (brightness < 0.95)
 
 
 def analyze_selection(infos, db, *, progress, cancelled, make_analyzer=SkyAnalyzer, workers=2):
