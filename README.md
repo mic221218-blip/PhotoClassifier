@@ -237,7 +237,7 @@ This feature uses the optional dependencies in `requirements-ai.txt` and local Y
 
 The sky preview uses the same optional dependencies and loads the evaluated SegFormer-B0 ONNX weights from `models/segformer-b0/model.onnx` or the same relative path under `.dsh_work/models/`. The upstream license covers research and evaluation. [Model file](https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-512/blob/main/onnx/model.onnx) · [Upstream license](https://github.com/NVlabs/SegFormer/blob/master/LICENSE)
 
-The six-subject analysis uses both sets of model files. Run it once on previously analyzed photos to assign roles.
+The six-subject analysis uses both sets of model files. Run it once on previously analyzed photos to assign roles. After upgrading, existing roles remain visible. Run the six-subject analysis again on selected photos to update their roles.
 
 Requirements: Python 3.12+. Core features use the standard library only;
 **image quality analysis needs the optional Pillow**:

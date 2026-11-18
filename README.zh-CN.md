@@ -182,7 +182,7 @@ Lightroom 等后期软件。
 
 天空分析使用同一份可选依赖和本地 `models/segformer-b0/model.onnx`，也支持 `.dsh_work/models/` 中的同结构缓存。试用采用指定的 SegFormer-B0 ONNX 权重，按上游的研究和评测许可使用。[权重文件](https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-512/blob/main/onnx/model.onnx) · [上游许可](https://github.com/NVlabs/SegFormer/blob/master/LICENSE)
 
-「六类题材主次」同时使用上述人物和天空模型。使用单项分析的旧照片需要运行一次六类分析才能得到主次。
+「六类题材主次」同时使用上述人物和天空模型。使用单项分析的旧照片需要运行一次六类分析才能得到主次。升级后可以继续浏览已有六类结果，重新运行「六类题材主次」会用新版规则更新所选照片。
 
 要求：Python 3.12+。核心功能只用标准库；**图像质量分析需要可选的 Pillow**：
 

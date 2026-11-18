@@ -29,6 +29,7 @@ from src.quality_store import QualityStore
 from src.rules import RULE_REGISTRY, RuleEngine, RuleMatch
 from src.sky_ai import MODEL_VERSION as SKY_MODEL_VERSION
 from src.scene_ai import MODEL_VERSION as SCENE_MODEL_VERSION, ROLE_NAMES, SUBJECTS, Role
+from src.scene_ai import PREVIOUS_MODEL_VERSION as PREVIOUS_SCENE_VERSION
 from src.tag_controller import TagController
 from src.tag_store import Tag, TagStore
 from src.timelapse import TimelapseStack, detect_timelapse
@@ -646,7 +647,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._rule_cache = {}
         self.person_results = self.db.person_results(PERSON_MODEL_VERSION)
         self.sky_results = self.db.sky_results(SKY_MODEL_VERSION)
-        self.scene_results = self.db.scene_results(SCENE_MODEL_VERSION)
+        self.scene_results = self.db.scene_results(SCENE_MODEL_VERSION, PREVIOUS_SCENE_VERSION)
         self._ensure_quality_cache(photos, skip_duplicates=skip_duplicate_rebuild)
         self._ensure_tag_cache()
         if self.sort_mode == SORT_SHARPNESS:

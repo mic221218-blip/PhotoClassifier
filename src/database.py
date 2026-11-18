@@ -502,15 +502,18 @@ class PhotoDatabase:
     def _ai_results(self, table: str, version: str) -> dict[str, bool]:
         return {row["path"]: bool(row["detected"]) for row in self._ai_rows(table, "detected", version)}
 
-    def scene_results(self, version: str) -> dict[str, dict[str, int]]:
-        return {row["path"]: json.loads(row["roles"]) for row in self._ai_rows("photo_scene_ai", "roles", version)}
+    def scene_results(self, version: str, *compatible_versions: str) -> dict[str, dict[str, int]]:
+        rows = self._ai_rows("photo_scene_ai", "roles", version, *compatible_versions)
+        return {row["path"]: json.loads(row["roles"]) for row in rows}
 
-    def _ai_rows(self, table: str, column: str, version: str):
+    def _ai_rows(self, table: str, column: str, version: str, *compatible_versions: str):
+        versions = (version, *compatible_versions)
+        placeholders = ", ".join("?" for _ in versions)
         return self._conn.execute(
             f"SELECT a.path, a.{column} FROM {table} a JOIN photos p ON a.path = p.path "
-            "WHERE a.model_version = ? AND a.file_size = p.size_bytes AND a.file_mtime IS p.modified_at "
+            f"WHERE a.model_version IN ({placeholders}) AND a.file_size = p.size_bytes AND a.file_mtime IS p.modified_at "
             "AND (p.file_mtime_ns IS NULL OR a.file_mtime_ns = p.file_mtime_ns)",
-            (version,),
+            versions,
         )
 
     def has_scene_result(self, info: PhotoInfo, version: str, mtime_ns: int) -> bool:

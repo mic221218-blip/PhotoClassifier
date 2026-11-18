@@ -2,7 +2,9 @@ from dataclasses import replace
 
 from src.database import PhotoDatabase
 from src.exif_reader import read_photo_info
-from src.scene_ai import Evidence, MODEL_VERSION, Role, analyze_selection, rank_subjects
+from src.scene_ai import (
+    COMPOSITION_PROMPTS, Evidence, MODEL_VERSION, PREVIOUS_MODEL_VERSION, Role, analyze_selection, rank_subjects,
+)
 
 
 def test_building_with_tiny_visitor_and_portrait_in_front_of_building():
@@ -44,9 +46,12 @@ def test_scene_batch_caches_empty_results_and_invalidates_changed_files(tmp_path
     catalog = tmp_path / "library.db"
     with PhotoDatabase.open(catalog) as db:
         db.upsert_photo(info)
+        assert db.save_scene_result(info, PREVIOUS_MODEL_VERSION, info.file_mtime_ns, {"sky": Role.PRIMARY})
+        assert db.scene_results(MODEL_VERSION, PREVIOUS_MODEL_VERSION) == {str(path): {"sky": Role.PRIMARY}}
         assert analyze_selection([info], db, **options) == (1, 0, 0, None)
     with PhotoDatabase.open(catalog) as db:
         assert db.scene_results(MODEL_VERSION) == {str(path): {}}
+        assert db.scene_results(MODEL_VERSION, PREVIOUS_MODEL_VERSION) == {str(path): {}}
         assert db.scene_results("other model") == {}
         assert analyze_selection([info], db, **options) == (0, 1, 0, None)
         changed = replace(info, file_mtime_ns=info.file_mtime_ns + 1)
@@ -57,3 +62,31 @@ def test_scene_batch_caches_empty_results_and_invalidates_changed_files(tmp_path
         db.remove_photos([path])
         db.upsert_photo(changed)
         assert db.scene_results(MODEL_VERSION) == {}
+
+
+def composition(**overrides):
+    return dict.fromkeys(COMPOSITION_PROMPTS, .20) | overrides
+
+
+def test_animal_subject_can_leave_water_as_setting_without_assigning_a_primary():
+    pond = {"landscape": Evidence(.23, .93, .89, .75)}
+    roles = rank_subjects(pond, False, composition(landscape=.237, animals=.265))
+    assert roles == {"landscape": Role.SECONDARY}
+
+
+def test_sunset_and_city_can_share_primary_but_plain_sky_stays_lower():
+    harbor = {"city": Evidence(.260, .17, .28, .16), "sky": Evidence(.246, .59, .71, .33)}
+    assert rank_subjects(harbor, False, composition(city=.259, sky=.246)) == {
+        "city": Role.PRIMARY, "sky": Role.PRIMARY}
+    ordinary = rank_subjects(harbor, False, composition(city=.270, sky=.224))
+    assert ordinary["city"] == Role.PRIMARY and ordinary["sky"] < Role.PRIMARY
+
+
+def test_foreground_landmark_and_an_ensemble_of_buildings_rank_differently():
+    skyline = {"building": Evidence(.260, .30, .57, .71), "city": Evidence(.260, .30, .57, .71)}
+    roles = rank_subjects(skyline, False, composition(building=.242, city=.280))
+    assert roles["city"] == Role.PRIMARY and roles["building"] < Role.PRIMARY
+    skyline["building"] = Evidence(.288, .47, .46, .74)
+    skyline["city"] = Evidence(.258, .47, .46, .74)
+    roles = rank_subjects(skyline, False, composition(building=.251, city=.296))
+    assert roles["building"] == Role.PRIMARY and roles["city"] < Role.PRIMARY
