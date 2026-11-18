@@ -104,7 +104,7 @@ def test_combined_ai_analysis_uses_the_same_checked_photos(root, db_path, tmp_pa
         app._select_result_row(paths[1])
         app._select_result_row(paths[2])
         app._select_result_row(paths[2])
-        app.ai_menu.invoke(2)
+        app.ai_menu.invoke("人物和天空")
         deadline = time.monotonic() + 5
         while app.ai_thread is not None and time.monotonic() < deadline:
             root.update()
@@ -167,7 +167,7 @@ def test_sky_analysis_combines_with_person_filter_and_reuses_results(root, db_pa
         app.btn_select_page.invoke()
         app._select_result_row(unselected)
         for _ in range(2):
-            app.ai_menu.invoke(1)
+            app.ai_menu.invoke("天空")
             assert app.btn_scan["state"] == "disabled"
             deadline = time.monotonic() + 5
             while app.ai_thread is not None and time.monotonic() < deadline:
@@ -262,7 +262,7 @@ def test_scene_subjects_rank_before_pagination_and_keep_unranked_detections(root
 def test_list_resize_keeps_filename_compact_and_tags_scrollable(root, db_path):
     app = seeded_app(root, db_path)
     try:
-        app.set_result_view("list")
+        app.view_menu.invoke("列表")
         root.maxsize(2000, 780)
         root.geometry("2000x780")
         root.deiconify()
@@ -340,7 +340,8 @@ def test_selection_mode_toggles_rows_and_cancels_across_pages(root, db_path, tmp
         app.btn_select_results.invoke()
         root.update()
         assert tree.selection() == ()
-        assert app.btn_ai["state"] == "disabled"
+        assert app.btn_ai["state"] == "normal"
+        assert app.ai_menu.entrycget("六类题材主次", "state") == "disabled"
         click(first, "name")
         assert tree.item(first, "text") == "☑"
         assert tree.selection() == (first,)
@@ -579,17 +580,18 @@ def test_gallery_preview_and_selection_follow_the_current_view(root, db_path, tm
         app.quick_filter_buttons["picked"].invoke()
         assert row_names(app) == {infos[0].file_name}
         app.quick_filter_buttons["all"].invoke()
-        app.open_gallery_preview()
+        app.btn_preview.invoke()
         assert app._preview_window.title() == infos[0].file_name
         app._navigate_gallery(0, 1)
         app._navigate_gallery(0, 1)
         assert app._result_page == 1
         assert app._preview_window.title() == infos[2].file_name
         app._preview_window.destroy()
-        app.toggle_detail_panel()
         assert not app.detail_panel.winfo_manager()
-        app.toggle_detail_panel()
+        app.btn_detail.invoke()
         assert app.detail_panel.winfo_manager()
+        app.btn_detail.invoke()
+        assert not app.detail_panel.winfo_manager()
     finally:
         root.withdraw()
         app.tag_store.close()
@@ -689,12 +691,12 @@ def test_scan_folds_timelapse_and_selects_all_source_frames(root, db_path, tmp_p
         assert {str(info.path) for info in app._selected_infos()} == set(frames)
         app.cancel_result_selection()
 
-        app.btn_fold_timelapse.invoke()
+        app.view_menu.invoke("折叠延时叠")
         assert app._page_count() == 51
         assert app.result_tree.get_children() == tuple(sorted(frames)[:20])
 
         cull = app.quick_filter_buttons["cull"]
-        assert cull["text"] == "筛选组"
+        assert cull["text"] == "隐藏延时叠"
         cull.invoke()
         assert set(app.result_tree.get_children()) == burst
         assert {photo.tile_id for photo in app.gallery._items} == burst
@@ -710,7 +712,7 @@ def test_scan_folds_timelapse_and_selects_all_source_frames(root, db_path, tmp_p
         app.rule_vars["high_iso"].set(False)
         app._on_filter_changed()
 
-        app.btn_fold_timelapse.invoke()
+        app.view_menu.invoke("折叠延时叠")
         assert set(app.result_tree.get_children()) == burst
         app.quick_filter_buttons["all"].invoke()
         assert set(app.result_tree.get_children()) == {stack_iid, *burst}
@@ -735,7 +737,8 @@ def test_raw_filter_check_and_summary_in_both_views(root, db_path, tmp_path) -> 
 
         app.btn_filters.invoke()
         check = app.raw_filter_check
-        assert app.filter_panel.pack_slaves()[1] is check
+        assert check.master is app.filter_panel
+        assert check.winfo_manager() == "pack"
         off_color = check["bg"]
         check.invoke()
         assert check["bg"] != off_color
@@ -795,6 +798,7 @@ def test_export_button_copies_the_cross_page_selection_after_confirmation(root, 
         assert dialog._summary["text"].startswith("2 个照片文件")
         dialog._scope.set("results")
         assert dialog._summary["text"].startswith("3 个照片文件")
+        assert dialog._action["text"] == "导出 3 个文件"
         assert dialog._action["state"] == "disabled"
         assert not list(destination.iterdir())
         dialog._close_button.invoke()
@@ -809,7 +813,8 @@ def test_export_button_copies_the_cross_page_selection_after_confirmation(root, 
         dialog._subfolder.set("精选")
         dialog._naming.set("numbered")
         dialog._prefix.set("album")
-        assert dialog._example_names["text"].splitlines() == ["album_001.NEF", "album_002.PNG"]
+        assert dialog._example_names["text"].splitlines() == ["album_00001.NEF", "album_00002.PNG"]
+        assert dialog._action["text"] == "导出 2 个文件"
         files[2].unlink()
         dialog._action.invoke()
         deadline = time.monotonic() + 5
@@ -827,8 +832,8 @@ def test_export_button_copies_the_cross_page_selection_after_confirmation(root, 
             time.sleep(0.01)
         assert dialog._detail["text"].endswith("成功 2  ·  跳过 0  ·  失败 0")
         assert {path.name: path.read_bytes() for path in (destination / "精选").iterdir()} == {
-            "album_001.NEF": files[0].read_bytes(),
-            "album_002.PNG": files[2].read_bytes(),
+            "album_00001.NEF": files[0].read_bytes(),
+            "album_00002.PNG": files[2].read_bytes(),
         }
         dialog._close_button.invoke()
         app.btn_export_results.invoke()
@@ -903,7 +908,7 @@ def test_raw_filter_preserves_timelapse_folding_and_limits_stack_selection(root,
 
         app.quick_filter_buttons["cull"].invoke()
         assert app.result_tree.get_children() == (str(single.path),)
-        app.btn_fold_timelapse.invoke()
+        app.view_menu.invoke("折叠延时叠")
         app.quick_filter_buttons["timelapse"].invoke()
         assert set(app.result_tree.get_children()) == set(raw_frames)
     finally:
@@ -1601,7 +1606,7 @@ def test_remove_selected_photos_removes_db_record_only(root, db_path: Path, monk
     app.quality_store.close()
 
 
-def test_sharpness_sort_button_column_and_restore(root, db_path: Path) -> None:
+def test_sharpness_sort_menu_column_and_restore(root, db_path: Path) -> None:
     app = PhotoClassifierApp(root, db_path)
     seed_rule_rows(app)
     seed_quality_rows(app)
@@ -1612,7 +1617,7 @@ def test_sharpness_sort_button_column_and_restore(root, db_path: Path) -> None:
     assert app.sort_mode == "default"
     assert row_names_in_order(app) == ["a.NEF", "b.NEF", "c.NEF", "d.NEF"]
 
-    app.btn_sort_quality.invoke()
+    app.view_menu.invoke("清晰度优先")
     assert app.sort_mode == "sharpness"
     assert row_names_in_order(app) == ["b.NEF", "c.NEF", "a.NEF", "d.NEF"]
 
@@ -1623,7 +1628,7 @@ def test_sharpness_sort_button_column_and_restore(root, db_path: Path) -> None:
     assert values["b.NEF"][8] == "500"
     assert values["c.NEF"][8] == "300"
     assert values["d.NEF"][8] == "—"
-    assert "✓" in app.btn_sort_quality.cget("text")
+    assert app.sort_choice.get()
 
     # 筛选后排序仍然成立
     app.quality_ok_var.set(True)
@@ -1631,7 +1636,7 @@ def test_sharpness_sort_button_column_and_restore(root, db_path: Path) -> None:
     assert row_names_in_order(app) == ["b.NEF"]
 
     app.clear_filters()
-    app.btn_sort_quality.invoke()
+    app.view_menu.invoke("清晰度优先")
     assert app.sort_mode == "default"
     assert row_names_in_order(app) == ["a.NEF", "b.NEF", "c.NEF", "d.NEF"]
     app.db.close()
@@ -1641,8 +1646,9 @@ def test_sharpness_sort_button_column_and_restore(root, db_path: Path) -> None:
 def test_sharpness_sort_requires_quality_data(root, db_path: Path) -> None:
     app = PhotoClassifierApp(root, db_path)
     seed_rule_rows(app)
-    app.btn_sort_quality.invoke()
+    app.view_menu.invoke("清晰度优先")
     assert app.sort_mode == "default"
+    assert not app.sort_choice.get()
     assert "还没有清晰度数据" in app.status_left.cget("text")
     app.db.close()
     app.quality_store.close()

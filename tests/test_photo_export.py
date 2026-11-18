@@ -64,16 +64,16 @@ def test_sequence_uses_one_number_per_pair_and_skips_pair_on_conflict(tmp_path):
     for source in (raw, jpg, png):
         source.write_bytes(source.suffix.encode())
     groups = named_groups([raw, png, jpg], "精选")
-    assert [[file.name for file in group] for group in groups] == [["精选_001.NEF", "精选_001.jpg"], ["精选_002.PNG"]]
+    assert [[file.name for file in group] for group in groups] == [["精选_00001.NEF", "精选_00001.jpg"], ["精选_00002.PNG"]]
     destination = tmp_path / "export"
     destination.mkdir()
-    existing = destination / "精选_001.jpg"
+    existing = destination / "精选_00001.jpg"
     existing.write_bytes(b"existing")
 
     report = photo_export.export_photos(groups, destination, skip_existing=True)
 
     assert [outcome.status for outcome in report.outcomes] == ["skipped", "skipped", "copied"]
-    assert sorted(path.name for path in destination.iterdir()) == ["精选_001.jpg", "精选_002.PNG"]
+    assert sorted(path.name for path in destination.iterdir()) == ["精选_00001.jpg", "精选_00002.PNG"]
     assert existing.read_bytes() == b"existing"
 
 
@@ -94,12 +94,12 @@ def test_cancel_finishes_current_pair_and_retry_preserves_assigned_name(tmp_path
     assert report.cancelled
     assert processed == ["pair.NEF", "pair.JPG"]
     assert [outcome.status for outcome in report.outcomes] == ["copied", "failed"]
-    assert (destination / "album_001.NEF").read_bytes() == raw.read_bytes()
-    assert not (destination / "album_002.PNG").exists()
+    assert (destination / "album_00001.NEF").read_bytes() == raw.read_bytes()
+    assert not (destination / "album_00002.PNG").exists()
 
     jpg.write_bytes(b"original jpeg")
     retry = photo_export.export_photos(((report.outcomes[1].file,),), destination, keep_names=True)
 
     assert [outcome.status for outcome in retry.outcomes] == ["copied"]
-    assert sorted(path.name for path in destination.iterdir()) == ["album_001.JPG", "album_001.NEF"]
-    assert (destination / "album_001.JPG").read_bytes() == jpg.read_bytes()
+    assert sorted(path.name for path in destination.iterdir()) == ["album_00001.JPG", "album_00001.NEF"]
+    assert (destination / "album_00001.JPG").read_bytes() == jpg.read_bytes()

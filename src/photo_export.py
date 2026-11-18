@@ -63,7 +63,7 @@ def group_export_sources(sources: Iterable[Path]) -> tuple[tuple[Path, ...], ...
 
 def name_export_groups(groups: Iterable[tuple[Path, ...]], prefix: str = "") -> Iterator[ExportGroup]:
     for sequence, group in enumerate(groups, 1):
-        stem = f"{prefix}_{sequence:03d}"
+        stem = f"{prefix}_{sequence:05d}"
         yield tuple(ExportFile(source, f"{stem}{source.suffix}" if prefix else source.name)
                     for source in group)
 

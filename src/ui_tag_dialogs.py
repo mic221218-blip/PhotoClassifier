@@ -110,25 +110,35 @@ class TagDialogsMixin:
             self.result_tree.selection_set(iid)
             self.result_tree.focus(iid)
         self._show_result_detail(iid)
+        menu = tk.Menu(self.root, tearoff=0, bg=CARD_BG, fg=TEXT, activebackground=ACCENT_DIM)
+        self._populate_result_menu(menu, iid)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _populate_result_menu(self, menu: tk.Menu, iid: str) -> None:
+        menu.delete(0, "end")
         count = len(self._selected_infos())
         batch_state = "normal" if count else "disabled"
-        menu = tk.Menu(self.root, tearoff=0, bg=CARD_BG, fg=TEXT, activebackground=ACCENT_DIM)
+        if not iid and not count:
+            menu.add_command(label="请先选择照片", state="disabled")
+            return
         if iid in self._timelapses:
             menu.add_command(label="展开延时叠", command=self.toggle_focused_timelapse)
             menu.add_command(label="选中整叠", command=self.select_focused_timelapse)
             menu.add_command(label="打开原文件夹", command=self.open_focused_timelapse_folder)
             if not count:
-                menu.tk_popup(event.x_root, event.y_root)
                 return
-        else:
+        elif self.current is not None:
             menu.add_command(label="打开图片", command=self.open_selected)
             menu.add_command(label="打开文件位置", command=self.reveal_selected)
-        menu.add_separator()
+        if menu.index("end") is not None:
+            menu.add_separator()
         menu.add_command(label=f"添加标签…（{count} 张）", command=self.batch_add_tags, state=batch_state)
         menu.add_command(label=f"移除标签…（{count} 张）", command=self.batch_remove_tags, state=batch_state)
-        if iid not in self._timelapses:
+        if self.current is not None:
             menu.add_separator()
             menu.add_command(label="复制路径", command=self.copy_selected_path)
+        if self._selecting_results and self.btn_export["state"] == "normal":
+            menu.add_command(label="导出所选照片…", command=lambda: self.open_export_dialog(selected_first=True))
         menu.add_separator()
         menu.add_command(
             label="取消精选" if self._selected_all_picked() else "标记精选",
@@ -142,7 +152,6 @@ class TagDialogsMixin:
             state=batch_state,
             foreground="#ff8a8a",
         )
-        menu.tk_popup(event.x_root, event.y_root)
 
     def batch_add_tags(self) -> None:
         infos = self._selected_infos()

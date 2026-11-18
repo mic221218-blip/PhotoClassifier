@@ -72,9 +72,12 @@ class AIAnalysisMixin:
 
     def _update_ai_button(self) -> None:
         count = sum(is_supported(self.infos_by_iid[iid].category) for iid in self._selected_iids)
-        label = f"AI 分析（{count:,} 张）" if count and count < len(self._selected_iids) else "AI 分析"
-        self.btn_ai.config(
-            text=f"{label} ▾", state="normal" if count else "disabled", bg=ACCENT if count else INPUT_BG,
+        label = f"分析（{count:,} 张）" if count and count < len(self._selected_iids) else "分析"
+        self.btn_ai.config(text=f"{label} ▾", bg=ACCENT if count else INPUT_BG)
+        for entry in ("六类题材主次", "人物和天空", "人物", "天空"):
+            self.ai_menu.entryconfigure(entry, state="normal" if count else "disabled")
+        self.ai_menu.entryconfigure(
+            self.ai_target_entry, label=f"AI 分析 · {count:,} 张" if count else "先多选照片，再运行 AI",
         )
 
     def start_person_analysis(self) -> None:

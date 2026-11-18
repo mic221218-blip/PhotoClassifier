@@ -17,7 +17,7 @@ from src.photo_export import (
 )
 from src.photo_info import PhotoInfo
 from src.shell import open_with_default_app
-from src.ui_theme import CARD_BG, GREEN, INPUT_BG, ORANGE, PANEL_BG, TEXT, TEXT_SUB
+from src.ui_theme import ACCENT, CARD_BG, GREEN, INPUT_BG, ORANGE, PANEL_BG, TEXT, TEXT_FAINT, TEXT_SUB
 
 
 def _load_settings(path: Path) -> tuple[Path | None, str]:
@@ -31,7 +31,7 @@ def _load_settings(path: Path) -> tuple[Path | None, str]:
     prefix = settings.get("prefix")
     base = Path(folder) if isinstance(folder, str) and "\x00" not in folder else None
     return (base if base and base.is_absolute() else None,
-            prefix if isinstance(prefix, str) and valid_export_name(f"{prefix}_001.JPG") else "")
+            prefix if isinstance(prefix, str) and valid_export_name(f"{prefix}_00001.JPG") else "")
 
 
 def _save_settings(path: Path, folder: Path, prefix: str) -> None:
@@ -131,10 +131,12 @@ class PhotoExportDialog(tk.Toplevel):
             frame.grid(row=row, column=1, sticky="ew", pady=(12, 0))
             return frame
 
-        def radio(parent, variable, value, text, *, enabled=True):
+        def radio(parent, variable, value, text, *, enabled=True, stacked=False):
             tk.Radiobutton(parent, variable=variable, value=value, text=text, bg=PANEL_BG, fg=TEXT,
                            activebackground=PANEL_BG, activeforeground=TEXT, selectcolor=INPUT_BG,
-                           font=app._font(10), state="normal" if enabled else "disabled").pack(side="left")
+                           anchor="w", font=app._font(10), state="normal" if enabled else "disabled").pack(
+                side="top" if stacked else "left", anchor="w",
+            )
 
         def entry(parent, variable):
             return tk.Entry(parent, textvariable=variable, width=23, bg=INPUT_BG, fg=TEXT, insertbackground=TEXT,
@@ -142,9 +144,12 @@ class PhotoExportDialog(tk.Toplevel):
 
         label(0, "导出范围")
         scope = controls(0)
-        radio(scope, self._scope, "selected", f"已选照片（{self._counts['selected']:,}）", enabled=bool(self._counts['selected']))
+        radio(
+            scope, self._scope, "selected", f"已选照片 · {self._counts['selected']:,} 个文件",
+            enabled=bool(self._counts["selected"]), stacked=True,
+        )
         view_label = "当前延时叠" if app._opened_timelapse_id is not None else "当前筛选结果（所有页）"
-        radio(scope, self._scope, "results", f"{view_label} · {self._counts['results']:,}")
+        radio(scope, self._scope, "results", f"{view_label} · {self._counts['results']:,} 个文件", stacked=True)
 
         label(1, "保存位置")
         folder = controls(1)
@@ -198,7 +203,7 @@ class PhotoExportDialog(tk.Toplevel):
         error = ""
         if subfolder and not valid_export_name(subfolder):
             error = "请输入有效的子文件夹名称。"
-        elif numbered and (not prefix or not valid_export_name(f"{prefix}_001.JPG")):
+        elif numbered and (not prefix or not valid_export_name(f"{prefix}_00001.JPG")):
             error = "请输入有效的文件名前缀。"
         self._destination = self._folder / subfolder if self._folder and not error else None
         self._path_preview.config(text=str(self._destination or self._folder or "请选择目标文件夹"))
@@ -206,7 +211,12 @@ class PhotoExportDialog(tk.Toplevel):
         examples = (file.name for group in name_export_groups(self._groups[scope], prefix) for file in group)
         self._example_names.config(text="\n".join(islice(examples, 3)) if not error else "")
         self._form_error.config(text=error)
-        self._action.config(state="normal" if self._destination and self._counts[scope] else "disabled")
+        can_export = bool(self._destination and self._counts[scope])
+        self._action.config(
+            text=f"导出 {self._counts[scope]:,} 个文件",
+            state="normal" if can_export else "disabled",
+            bg=ACCENT if can_export else INPUT_BG, fg="#ffffff" if can_export else TEXT_FAINT,
+        )
 
     def _close(self, _event=None) -> str:
         if self._running:
@@ -291,7 +301,7 @@ class PhotoExportDialog(tk.Toplevel):
         self._running = False
         self._progress.pack_forget()
         self._close_button.config(text="关闭", state="normal")
-        self._action.config(text="打开导出文件夹", command=self._open_folder, state="normal")
+        self._action.config(text="打开导出文件夹", command=self._open_folder, state="normal", bg=ACCENT, fg="#ffffff")
         self._action.pack(side="right", before=self._close_button)
         if isinstance(result, ExportResult):
             self._outcomes.update((outcome.file.source, outcome) for outcome in result.outcomes)

@@ -140,12 +140,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._build_toolbar()
         self._build_status_bar()
         self._build_left_panel()
-        # 先放右侧详情面板、再放中间（中间 expand 会吃掉剩余空间）
         self._build_detail_panel()
         self._build_center()
 
         self.set_result_view("grid", focus=False)
-        self.btn_detail.config(bg=ACCENT_DIM)
         self.refresh_library()
         self.refresh_tags()
         self.refresh_results()
@@ -289,7 +287,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             is_supported(self.infos_by_iid[path].category)
             for iid in self._result_iids for path in self._paths_for_row(iid)
         )
-        self.btn_export_results.config(state="normal" if enabled else "disabled")
+        self.btn_export_results.config(
+            state="normal" if enabled else "disabled",
+            bg=ACCENT if enabled else INPUT_BG, fg="#ffffff" if enabled else TEXT_FAINT,
+        )
 
     def start_result_selection(self) -> None:
         if self._selecting_results or not self.result_tree.get_children():
@@ -531,9 +532,11 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         )
         for widget in (self.btn_add, self.library_menu_button):
             widget.config(state="disabled" if busy else "normal")
-        for entry in ("扫描范围…", "全量重扫…", "质量分析…"):
-            enabled = has_folders and (entry != "质量分析…" or PILLOW_AVAILABLE)
-            self.library_menu.entryconfigure(entry, state="normal" if enabled else "disabled")
+        for entry in ("扫描范围…", "全量重扫…"):
+            self.library_menu.entryconfigure(entry, state="normal" if has_folders else "disabled")
+        self.btn_ai.config(state="disabled" if busy else "normal")
+        self.ai_menu.entryconfigure("质量分析…", state="normal" if has_folders and PILLOW_AVAILABLE else "disabled")
+        self._update_ai_button()
 
     def choose_scan_folders(self) -> None:
         paths = self._folder_paths
@@ -686,7 +689,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._refresh_result_rows()
         self._result_page = min(self._result_page, self._page_count() - 1)
         self._render_result_page()
-        self._update_sort_button()
+        self._update_sort_menu()
         if self._focus_iid:
             if self._focus_iid in self._result_iids:
                 self._show_result_detail(self._focus_iid)
@@ -871,13 +874,13 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if not self._folder_paths:
             empty = "添加文件夹，开始整理照片"
         elif self._quick_filter in ("issues", "duplicates") and not self.measurements_by_path:
-            empty = "从「更多 → 质量分析」分析照片后，可以在这里复核结果。"
+            empty = "从「分析 → 质量分析」分析照片后，可以在这里复核结果。"
         elif self._quick_filter == "timelapse" and not self._catalog_timelapses:
             empty = "这个范围里还没有识别到延时序列"
         elif self._quick_filter != "all" or not self._filter_selection().is_empty:
             empty = "没有符合当前筛选条件的照片"
         elif self._browse_folder and self.checked_folders and self._browse_folder not in self.checked_folders:
-            empty = "这个文件夹还没有照片。可在「更多 → 扫描范围」中将它加入扫描。"
+            empty = "这个文件夹还没有照片。可在「管理照片库 → 扫描范围」中将它加入扫描。"
         else:
             empty = "这里还没有照片。点击「扫描新文件」读取照片。"
         self.gallery.show_photos(gallery_photos, empty)
@@ -907,7 +910,9 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self.btn_result_prev.pack(side="left", before=self.page_status)
             self.btn_result_next.pack(side="left", padx=(5, 10), before=self.page_status)
         self.page_status.config(text=f"第 {self._result_page + 1} / {pages} 页" if pages > 1 else "")
-        self.btn_select_results.config(state="normal" if self._result_iids else "disabled")
+        state = "normal" if self._result_iids else "disabled"
+        for button in (self.btn_preview, self.btn_photo_actions, self.btn_select_results):
+            button.config(state=state)
         self._update_export_button()
         title = self._folder_label(Path(self._browse_folder)) if self._browse_folder else "全部照片"
         stack = self._timelapses.get(self._opened_timelapse_id)
@@ -915,16 +920,17 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             title = f"延时 · {stack.frame_count:,} 帧"
             count = f"{len(self._result_iids):,} 张"
             self.btn_leave_timelapse.pack(side="left", before=self.gallery_title, padx=(0, 8))
-            self.btn_fold_timelapse.config(state="disabled", fg=TEXT_FAINT)
         else:
             count = f"{len(self._matched_iids):,} 张"
             folded = sum(iid in self._timelapses for iid in self._result_iids) if self._timelapses else 0
             if folded:
                 count += f" · {folded:,} 叠"
             self.btn_leave_timelapse.pack_forget()
-            self.btn_fold_timelapse.config(state="normal", fg=TEXT)
-        self.btn_fold_timelapse.config(bg=ACCENT_DIM if self._fold_timelapses else INPUT_BG)
-        self.gallery_title.config(text=title if len(title) <= 22 else title[:21] + "…")
+        self.fold_choice.set(self._fold_timelapses)
+        self.view_menu.entryconfigure("折叠延时叠", state="disabled" if stack is not None else "normal")
+        scope = self.quick_filter_buttons[self._quick_filter]["text"] if self._quick_filter != "all" and stack is None else ""
+        title = title if len(title) <= 22 else title[:21] + "…"
+        self.gallery_title.config(text=f"{title} · {scope}" if scope else title)
         self.count_label.config(text=count)
         self._update_shortcut_hint()
         for key, button in self.quick_filter_buttons.items():
@@ -991,21 +997,17 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             sharpness_score(measurement) is not None
             for measurement in self.measurements_by_path.values()
         ):
-            self.status_left.config(text="还没有清晰度数据，请先点“质量分析”")
+            self.sort_choice.set(False)
+            self.status_left.config(text="还没有清晰度数据，请先运行「分析 → 质量分析」")
             return
         self.sort_mode = SORT_SHARPNESS
         self.refresh_results()
 
-    def _update_sort_button(self) -> None:
-        button = getattr(self, "btn_sort_quality", None)
-        if button is None:
-            return
-        if self._opened_timelapse_id is not None:
-            button.config(text="按拍摄时间", bg=INPUT_BG, fg=TEXT_FAINT, state="disabled")
-        elif self.sort_mode == SORT_SHARPNESS:
-            button.config(text="清晰度优先 ✓", bg=ACCENT, fg="#ffffff", state="normal")
-        else:
-            button.config(text="清晰度优先", bg=INPUT_BG, fg=TEXT, state="normal")
+    def _update_sort_menu(self) -> None:
+        self.sort_choice.set(self.sort_mode == SORT_SHARPNESS)
+        self.view_menu.entryconfigure(
+            "清晰度优先", state="disabled" if self._opened_timelapse_id is not None else "normal",
+        )
 
     def _ensure_tag_cache(self) -> None:
         self.tag_controller.ensure_loaded()
@@ -1118,10 +1120,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if self.filter_panel.winfo_manager():
             self.filter_panel.pack_forget()
             self.left_canvas.yview_moveto(0)
-            self.btn_filters.config(text="筛选")
+            self.btn_filters.config(text="筛选", bg=INPUT_BG)
         else:
             self.filter_panel.pack(fill="x", pady=(0, 10))
-            self.btn_filters.config(text="收起筛选")
+            self.btn_filters.config(text="收起筛选", bg=ACCENT_DIM)
 
     def _show_active_filters(self) -> None:
         raw_only = self.raw_only.get()
@@ -1198,8 +1200,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self.list_frame.pack_forget()
         frame = self.grid_frame if mode == "grid" else self.list_frame
         frame.pack(fill="both", expand=True)
-        for key, button in self.view_buttons.items():
-            button.config(bg=ACCENT_DIM if key == mode else INPUT_BG)
+        self.view_choice.set(mode)
         if self._focus_iid in self.result_tree.get_children():
             if mode == "grid":
                 self.gallery.after_idle(self.gallery.see_photo, self._focus_iid)

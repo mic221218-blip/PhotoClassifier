@@ -34,13 +34,13 @@ class PanelsMixin:
         bar = tk.Frame(self.root, bg=PANEL_BG, height=52)
         bar.pack(fill="x", side="top")
         bar.pack_propagate(False)
-        tk.Label(bar, text="照片库", bg=PANEL_BG, fg=TEXT, font=self._font(11, bold=True)).pack(
+        tk.Label(bar, text="PhotoClassifier", bg=PANEL_BG, fg=TEXT, font=self._font(11, bold=True)).pack(
             side="left", padx=16,
         )
-        self.library_menu_button, self.library_menu = self._menu_button(bar, "更多 ▾")
+        self.library_menu_button, self.library_menu = self._menu_button(bar, "管理照片库 ▾")
         self.library_menu.add_command(label="扫描范围…", command=self.choose_scan_folders)
         self.library_menu.add_command(label="全量重扫…", command=lambda: self.start_scan(full=True))
-        self.library_menu.add_command(label="质量分析…", command=self.start_analysis)
+        self.library_menu.add_command(label="管理标签…", command=self.open_tag_manager)
         self.library_menu.add_separator()
         self.library_menu.add_command(label="从库中移除当前文件夹…", command=self.remove_selected_folder)
         self.library_menu_button.pack(side="right", padx=(0, 14))
@@ -48,8 +48,6 @@ class PanelsMixin:
         self.btn_scan.pack(side="right", padx=(8, 6))
         self.scan_scope_label = tk.Label(bar, bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9))
         self.scan_scope_label.pack(side="right")
-        self.btn_detail = self._button(bar, "照片详情", self.toggle_detail_panel)
-        self.btn_detail.pack(side="left", padx=(0, 6))
 
     def _menu_button(self, parent, text):
         button = tk.Menubutton(
@@ -98,7 +96,7 @@ class PanelsMixin:
 
         library_header = tk.Frame(panel, bg=PANEL_BG)
         library_header.pack(fill="x", padx=12, pady=(12, 8))
-        tk.Label(library_header, text="文件夹", bg=PANEL_BG, fg=TEXT, font=self._font(11, bold=True)).pack(
+        tk.Label(library_header, text="照片库", bg=PANEL_BG, fg=TEXT, font=self._font(11, bold=True)).pack(
             side="left",
         )
         self.btn_add = self._button(library_header, "+ 添加", self.add_folder_dialog)
@@ -114,12 +112,27 @@ class PanelsMixin:
         self.library_tree.column("#0", width=190, minwidth=120)
         self.library_tree.bind("<<TreeviewSelect>>", self._on_library_select)
         self.library_tree.bind("<MouseWheel>", self._on_sidebar_wheel)
+        section = tk.Frame(panel, bg=PANEL_BG)
+        section.pack(fill="x", padx=12, pady=(14, 4))
+        tk.Label(section, text="浏览结果", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9, bold=True)).pack(anchor="w")
+        self.quick_filter_buttons = {}
+        self._build_quick_filters(section, (("all", "全部"), ("picked", "精选")))
         self._build_filters(panel)
+
+    def _build_quick_filters(self, parent, options) -> None:
+        row = tk.Frame(parent, bg=PANEL_BG)
+        row.pack(fill="x", pady=(3, 0))
+        for index, (key, label) in enumerate(options):
+            button = self._button(row, label, lambda key=key: self.set_quick_filter(key))
+            button.grid(row=index // 2, column=index % 2, sticky="ew", padx=2, pady=2)
+            self.quick_filter_buttons[key] = button
+        row.columnconfigure((0, 1), weight=1, uniform="filters")
 
     def _build_filters(self, parent) -> None:
         self.filter_panel = panel = tk.Frame(parent, bg=PANEL_BG)
+        tk.Frame(panel, bg=BORDER_SOFT, height=1).pack(fill="x", padx=12, pady=(5, 0))
         tk.Label(panel, text="筛选", bg=PANEL_BG, fg=TEXT, font=self._font(11, bold=True)).pack(
-            anchor="w", padx=16, pady=(12, 6)
+            anchor="w", padx=12, pady=(8, 6)
         )
         self.raw_filter_check = tk.Checkbutton(
             panel, text="只看 RAW", variable=self.raw_only, command=self._on_filter_changed,
@@ -129,11 +142,52 @@ class PanelsMixin:
             font=self._font(10, bold=True),
         )
         self.raw_filter_check.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Label(panel, text="AI 题材", bg=PANEL_BG, fg=TEXT, font=self._font(9, bold=True)).pack(
+            anchor="w", padx=12,
+        )
+        subjects = tk.Frame(panel, bg=PANEL_BG)
+        subjects.pack(fill="x", padx=12, pady=(2, 6))
+        for index, (key, variable) in enumerate(self.ai_filters.items()):
+            tk.Checkbutton(
+                subjects, text=SUBJECTS[key], variable=variable, command=self.refresh_results,
+                bg=PANEL_BG, fg=TEXT, activebackground=PANEL_BG, activeforeground=TEXT,
+                selectcolor=INPUT_BG, font=self._font(9),
+            ).grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 6))
+
+        logic = tk.Frame(panel, bg=PANEL_BG)
+        logic.pack(fill="x", padx=12)
+        for text, value in (("同时满足", True), ("满足其一", False)):
+            tk.Radiobutton(
+                logic, text=text, value=value, variable=self.and_mode, command=self._on_filter_changed,
+                bg=PANEL_BG, fg=TEXT_SUB, activebackground=PANEL_BG, activeforeground=TEXT_SUB,
+                selectcolor=INPUT_BG, font=self._font(9),
+            ).pack(side="left")
+
+        scope = tk.Frame(panel, bg=PANEL_BG)
+        scope.pack(fill="x", padx=12, pady=(8, 6))
+        tk.Label(scope, text="查看范围", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9, bold=True)).pack(anchor="w")
+        self._build_quick_filters(scope, (
+            ("issues", "质量问题"), ("duplicates", "重复组"),
+            ("timelapse", "延时叠"), ("cull", "隐藏延时叠"),
+        ))
+
+        advanced = tk.Frame(panel, bg=PANEL_BG)
+
+        def toggle_advanced():
+            if advanced.winfo_manager():
+                advanced.pack_forget()
+                advanced_button.config(text="拍摄规则与质量 ▸")
+            else:
+                advanced.pack(fill="x", after=advanced_button, pady=(5, 0))
+                advanced_button.config(text="拍摄规则与质量 ▾")
+
+        advanced_button = self._button(panel, "拍摄规则与质量 ▸", toggle_advanced)
+        advanced_button.pack(fill="x", padx=12, pady=(0, 6))
         tk.Label(
-            panel, text="自动标签（EXIF 规则）", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9, bold=True)
+            advanced, text="自动标签（EXIF 规则）", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9, bold=True)
         ).pack(anchor="w", padx=16, pady=(0, 6))
 
-        rules = tk.Frame(panel, bg=PANEL_BG)
+        rules = tk.Frame(advanced, bg=PANEL_BG)
         rules.pack(fill="x", padx=12)
         rule_entries = [(rule_id, zh) for rule_id, zh, _en, _fn in RULE_REGISTRY]
         for i, (rule_id, label) in enumerate(rule_entries):
@@ -152,7 +206,7 @@ class PanelsMixin:
                 font=self._font(9),
             ).grid(row=i // 2, column=i % 2, sticky="w", pady=1, padx=(0, 6))
 
-        gps_row = tk.Frame(panel, bg=PANEL_BG)
+        gps_row = tk.Frame(advanced, bg=PANEL_BG)
         gps_row.pack(fill="x", padx=16, pady=(2, 0))
         tk.Checkbutton(
             gps_row,
@@ -167,19 +221,12 @@ class PanelsMixin:
             font=self._font(9),
         ).pack(anchor="w")
 
-        tk.Frame(panel, bg=BORDER_SOFT, height=1).pack(fill="x", padx=12, pady=(8, 6))
+        tk.Frame(advanced, bg=BORDER_SOFT, height=1).pack(fill="x", padx=12, pady=(8, 6))
         tk.Label(
-            panel, text="质量分析", bg=PANEL_BG, fg=TEXT, font=self._font(10, bold=True)
+            advanced, text="质量标记", bg=PANEL_BG, fg=TEXT, font=self._font(10, bold=True)
         ).pack(anchor="w", padx=16)
-        tk.Label(
-            panel,
-            text="勾选问题以查看坏片，或直接看“质量正常”",
-            bg=PANEL_BG,
-            fg=TEXT_FAINT,
-            font=self._font(8),
-        ).pack(anchor="w", padx=16, pady=(0, 4))
 
-        quality = tk.Frame(panel, bg=PANEL_BG)
+        quality = tk.Frame(advanced, bg=PANEL_BG)
         quality.pack(fill="x", padx=12)
         for i, flag_id in enumerate(FLAG_IDS):
             var = tk.BooleanVar(value=False)
@@ -198,7 +245,7 @@ class PanelsMixin:
             ).grid(row=i // 2, column=i % 2, sticky="w", pady=1, padx=(0, 6))
 
         tk.Checkbutton(
-            panel,
+            advanced,
             text="只看质量正常",
             variable=self.quality_ok_var,
             command=self._on_quality_ok_changed,
@@ -214,9 +261,6 @@ class PanelsMixin:
         tk.Label(
             panel, text="我的标签", bg=PANEL_BG, fg=TEXT, font=self._font(10, bold=True)
         ).pack(anchor="w", padx=16)
-        tk.Label(
-            panel, text="勾选后与规则 / 质量共用 并且/或者", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)
-        ).pack(anchor="w", padx=16, pady=(0, 4))
 
         tk.Label(panel, text="搜索标签", bg=PANEL_BG, fg=TEXT_FAINT, font=self._font(8)).pack(
             anchor="w", padx=16
@@ -251,33 +295,6 @@ class PanelsMixin:
         self.btn_manage_tags = self._button(panel, "管理标签…", self.open_tag_manager)
         self.btn_manage_tags.pack(fill="x", padx=16, pady=(6, 2), ipady=1)
 
-        for key, variable in self.ai_filters.items():
-            tk.Checkbutton(
-                panel, text=f"AI 建议 · {SUBJECTS[key]}", variable=variable, command=self.refresh_results,
-                bg=PANEL_BG, fg=TEXT, activebackground=PANEL_BG, activeforeground=TEXT,
-                selectcolor=INPUT_BG, font=self._font(9),
-            ).pack(anchor="w", padx=16, pady=(6, 0))
-
-        logic_row = tk.Frame(panel, bg=PANEL_BG)
-        logic_row.pack(fill="x", padx=16, pady=(8, 0))
-        tk.Label(logic_row, text="条件组合", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9)).pack(anchor="w")
-        radios = tk.Frame(logic_row, bg=PANEL_BG)
-        radios.pack(anchor="w", pady=(2, 0))
-        for text, value in (("并且 AND", True), ("或者 OR", False)):
-            tk.Radiobutton(
-                radios,
-                text=text,
-                value=value,
-                variable=self.and_mode,
-                command=self._on_filter_changed,
-                bg=PANEL_BG,
-                fg=TEXT_SUB,
-                activebackground=PANEL_BG,
-                activeforeground=TEXT_SUB,
-                selectcolor=INPUT_BG,
-                font=self._font(9),
-            ).pack(anchor="w")
-
         self.btn_clear = self._button(panel, "清除筛选", self.clear_filters)
         self.btn_clear.pack(fill="x", padx=16, pady=(10, 2), ipady=2)
 
@@ -297,10 +314,6 @@ class PanelsMixin:
         self.gallery_title.pack(side="left")
         self.count_label = tk.Label(header, text="", bg=WIN_BG, fg=TEXT_SUB, font=self._font(9))
         self.count_label.pack(side="left", padx=(12, 0))
-        self.btn_export_results = self._button(header, "导出…", self.open_export_dialog)
-        self.btn_export_results.pack(side="right")
-        self.btn_sort_quality = self._button(header, "清晰度优先", self.toggle_quality_sort)
-        self.btn_sort_quality.pack(side="right", padx=(0, 4))
 
         # 扫描进度视图（扫描时显示，平时隐藏）
         self.progress_frame = tk.Frame(center, bg=WIN_BG)
@@ -388,27 +401,33 @@ class PanelsMixin:
     def _build_gallery_controls(self) -> None:
         controls = tk.Frame(self.result_frame, bg=WIN_BG)
         controls.pack(fill="x", padx=14, pady=(0, 8))
-        self.quick_filter_buttons = {}
-        for key, label in (
-            ("all", "全部"), ("picked", "精选"), ("issues", "质量问题"), ("duplicates", "重复组"),
-            ("timelapse", "延时叠"), ("cull", "筛选组"),
-        ):
-            button = self._button(controls, label, lambda key=key: self.set_quick_filter(key))
-            button.configure(padx=8)
-            button.pack(side="left", padx=(0, 4))
-            self.quick_filter_buttons[key] = button
-        self.view_buttons = {}
-        for key, label in (("list", "列表"), ("grid", "网格")):
-            button = self._button(controls, label, lambda key=key: self.set_result_view(key))
-            button.configure(padx=8)
-            button.pack(side="right", padx=(3, 0))
-            self.view_buttons[key] = button
         self.btn_filters = self._button(controls, "筛选", self.toggle_filters)
-        self.btn_filters.configure(padx=8)
-        self.btn_filters.pack(side="right", padx=(4, 5))
-        self.btn_fold_timelapse = self._button(controls, "折叠延时", self.toggle_timelapse_folding)
-        self.btn_fold_timelapse.configure(padx=8)
-        self.btn_fold_timelapse.pack(side="right", padx=(0, 4))
+        self.btn_filters.pack(side="left", padx=(0, 6))
+        view_button, self.view_menu = self._menu_button(controls, "视图 ▾")
+        view_button.pack(side="left", padx=(0, 6))
+        self.view_choice = tk.StringVar(self.root, value=self._result_view)
+        self.fold_choice = tk.BooleanVar(self.root, value=self._fold_timelapses)
+        self.sort_choice = tk.BooleanVar(self.root)
+        for key, label in (("grid", "网格"), ("list", "列表")):
+            self.view_menu.add_radiobutton(
+                label=label, variable=self.view_choice, value=key, command=lambda key=key: self.set_result_view(key),
+            )
+        self.view_menu.add_separator()
+        self.view_menu.add_checkbutton(label="折叠延时叠", variable=self.fold_choice, command=self.toggle_timelapse_folding)
+        self.view_menu.add_checkbutton(label="清晰度优先", variable=self.sort_choice, command=self.toggle_quality_sort)
+
+        self.btn_ai, self.ai_menu = self._menu_button(controls, "分析 ▾")
+        self.btn_ai.pack(side="left")
+        self.ai_menu.add_command(label="质量分析…", command=self.start_analysis)
+        self.ai_menu.add_separator()
+        self.ai_menu.add_command(label="先多选照片，再运行 AI", state="disabled")
+        self.ai_target_entry = self.ai_menu.index("end")
+        self.ai_menu.add_command(label="六类题材主次", command=self.start_scene_analysis)
+        self.ai_menu.add_command(label="人物和天空", command=self.start_people_and_sky_analysis)
+        self.ai_menu.add_command(label="人物", command=self.start_person_analysis)
+        self.ai_menu.add_command(label="天空", command=self.start_sky_analysis)
+        self.btn_export_results = self._button(controls, "导出结果…", self.open_export_dialog, primary=True)
+        self.btn_export_results.pack(side="right")
         self.active_filter_row = tk.Frame(self.result_frame, bg=WIN_BG)
         self.filter_summary = tk.Label(self.active_filter_row, bg=WIN_BG, fg=TEXT_SUB, font=self._font(9))
         self.filter_summary.pack(side="left", padx=(0, 4))
@@ -419,6 +438,13 @@ class PanelsMixin:
         self.gallery_controls = controls
 
     def _build_selection_bar(self) -> None:
+        self.btn_preview = self._button(self.page_controls, "预览", self.open_gallery_preview)
+        self.btn_preview.pack(side="left")
+        self.btn_detail = self._button(self.page_controls, "照片详情", self.toggle_detail_panel)
+        self.btn_detail.pack(side="left", padx=6)
+        self.btn_photo_actions, self.photo_menu = self._menu_button(self.page_controls, "照片操作 ▾")
+        self.photo_menu.configure(postcommand=lambda: self._populate_result_menu(self.photo_menu, self._focus_iid))
+        self.btn_photo_actions.pack(side="left")
         self.btn_select_results = self._button(self.page_controls, "多选", self.start_result_selection)
         self.btn_select_results.pack(side="right")
         self.btn_select_page = self._button(
@@ -430,8 +456,6 @@ class PanelsMixin:
         self.selection_count.pack(side="left", padx=(12, 10))
         self.btn_batch_tag = self._button(self.selection_actions, "添加标签", self.batch_add_tags, disabled=True)
         self.btn_batch_tag.pack(side="left", padx=(0, 4), pady=5)
-        self.btn_ai, self.ai_menu = self._menu_button(self.selection_actions, "AI 分析 ▾")
-        self.btn_ai.pack(side="left", padx=(0, 4), pady=5)
         self.btn_pick = self._button(self.selection_actions, "标记精选", self.toggle_picked, disabled=True)
         self.btn_pick.pack(side="left", padx=(0, 4), pady=5)
         self.btn_export = self._button(
@@ -440,10 +464,6 @@ class PanelsMixin:
         self.btn_export.pack(side="left", pady=5)
         self.btn_cancel_selection = self._button(self.selection_actions, "清除选择", self.cancel_result_selection)
         self.btn_cancel_selection.pack(side="right", padx=(0, 8), pady=5)
-        self.ai_menu.add_command(label="人物", command=self.start_person_analysis)
-        self.ai_menu.add_command(label="天空", command=self.start_sky_analysis)
-        self.ai_menu.add_command(label="人物和天空", command=self.start_people_and_sky_analysis)
-        self.ai_menu.add_command(label="六类题材主次", command=self.start_scene_analysis)
 
     # ------------------------------------------------------------------ #
     # 右侧：详情面板
@@ -451,7 +471,6 @@ class PanelsMixin:
 
     def _build_detail_panel(self) -> None:
         panel = tk.Frame(self.root, bg=PANEL_BG, width=326)
-        panel.pack(side="right", fill="y")
         panel.pack_propagate(False)
         self.detail_panel = panel
         header = tk.Frame(panel, bg=PANEL_BG)

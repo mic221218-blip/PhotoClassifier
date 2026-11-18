@@ -176,37 +176,37 @@ presented and filtered through the same layer.
 ### Desktop interface ✅
 
 - **Folder library**: click a folder to browse it or choose All Photos. Set the
-  scan scope separately under More → Scan scope;
+  scan scope under **管理照片库 → 扫描范围**;
 - **Background scanning**: progress bar + current file + live success/error
   counts, cancellable at any time;
-- **Photo grid**: arrow keys browse photos. Space or double-click opens the
-  large preview. Switch to List for the EXIF columns, and double-click a row
-  there to open it in the default photo app;
+- **Photo grid**: arrow keys browse photos. Click **预览**, press Space or
+  double-click to open the large preview. Use **视图 → 列表** for the EXIF columns.
+  Double-click a row in the list to open it in the default photo app;
 - **Timelapse stacks**: after scanning, regular sequences of NEF and JPEG photos
   in the same folder are collapsed into a cover with a frame count. Sequences of
   10 frames or fewer stay individual, with same-name NEF and JPEG counted as one
   frame. Double-click a stack to browse it in capture order. Right-click to select
-  all its originals or open their folder. Use the Timelapse filter to find stacks and the fold
-  button to switch between stacked and individual photos;
-- **Detail panel**: collapsible photo preview and tags. Expand Shooting
-  Parameters and Analysis for EXIF, quality measurements and matching rules;
-- **Filters and quality analysis**: switch between All, Picks, Quality Issues
-  and Duplicate Groups, or use Cull Group (筛选组) to browse photos outside of
-  timelapse stacks. The Filters panel includes rules, quality flags, custom tags
-  and AI suggestions. Run quality analysis from More;
+  all its originals or open their folder. Use **筛选 → 查看范围 → 延时叠** to find stacks
+  and **视图 → 折叠延时叠** to toggle folding;
+- **Detail panel**: click **照片详情** below the photos for the preview and tags.
+  Expand Shooting Parameters and Analysis for EXIF, quality measurements and matching rules;
+- **Filters and quality analysis**: the sidebar has All and Picks views.
+  **筛选 → 查看范围** includes Quality Issues, Duplicate Groups, Timelapse Stacks and
+  Hide Timelapse Stacks. The filter panel combines AI subjects, shooting rules,
+  quality flags and custom tags. Run quality analysis from **分析 → 质量分析**;
 - Check **只看 RAW** at the top of Filters to show only NEF originals.
   It combines with the existing filters. Collapsed timelapse stacks count and
   select only their visible RAW frames.
-- **Sharpness sort (P1)**: a "Sharpness first" button in the result header sorts
+- **Sharpness sort (P1)**: **视图 → 清晰度优先** sorts
   by `blur_score` high to low; a numeric "Sharpness" column; unanalyzed / video /
   failed photos go last; the sort applies to the current view and is not persisted
   after closing the app;
 - **Quick pick (P2)**: select photos and click "Pick" or press `P`; when all
   selected photos are already picked the button turns into "Unpick"; it reuses
   the "精选" tag, so the Picks filter shows them and `Ctrl+Z` undoes;
-- **My tags (V3)**: searchable checkbox list with photo counts under Filters;
-  chip editing in the detail panel; right-click batch add/remove with single-step
-  undo; a tag manager dialog;
+- **My tags (V3)**: searchable checkbox list with photo counts under Filters
+  and chip editing in the detail panel. The **照片操作** and right-click menus
+  include batch add/remove with single-step undo. Open the tag manager from **管理照片库**;
 - Grid thumbnails and large previews use Pillow (see `requirements-quality.txt`)
   and support JPEG, PNG and NEF files with embedded JPEG previews;
 - Launch: the desktop shortcut (pointing at `run_gui.pyw`), or
@@ -214,9 +214,9 @@ presented and filtered through the same layer.
 
 #### Export photos for Lightroom
 
-1. Click **导出…** above the results to export matching photos across all pages. Inside an open timelapse stack, this scope covers the stack. To export only checked photos, click **导出所选照片…** on the selection bar.
-2. Choose a destination folder and optionally enter a subfolder name. Keep the original filenames or select **前缀 + 序号** to use a prefix and sequence number. A NEF and JPEG with the same stem in the same source folder share a number when both are in scope. If a name is taken, you can add a suffix to both names or skip the pair.
-3. Check the destination path, total file count, estimated size and sample filenames, then click **开始导出**. The app copies the original NEF, JPEG and PNG files, skips originals already in the destination and remembers the base folder and naming choice.
+1. Click **导出结果…** above the results to export matching photos across all pages. Inside an open timelapse stack, this scope covers the stack. To export only checked photos, click **导出所选照片…** on the selection bar.
+2. Choose a destination folder and optionally enter a subfolder name. Keep the original filenames or select **前缀 + 序号** to number files starting at 00001. A NEF and JPEG with the same stem in the same source folder share a number when both are in scope. If a name is taken, you can add a suffix to both names or skip the pair.
+3. Check the destination path, total file count, estimated size and sample filenames, then click the export button showing the file count. The app copies the original NEF, JPEG and PNG files, skips originals already in the destination and remembers the base folder and naming choice.
 4. To stop, click **取消导出**. The app finishes the current file or pair and keeps completed copies. Use **重试失败项** to retry failed files. Click **打开导出文件夹** to view the copies, then import that folder from Lightroom.
 
 ![Photo export dialog showing the scope, destination, naming options and filename preview](docs/ui-images/ui-export.png)
@@ -227,11 +227,11 @@ presented and filtered through the same layer.
 
 Use a thumbnail checkbox or enter multi-select mode with **多选**. You can also Ctrl-click to toggle a photo or Shift-click to select a range on the current page. Selections carry across pages, and **全选本页** selects the current page. Click **清除选择** or press Escape to return to browsing. When filters change, matching photos stay selected.
 
-Choose **AI 分析 → 六类题材主次** to analyze people, sky, architecture, city, flowers and natural landscapes together. Whole-frame content, visible area, position and local detail determine each subject's role. A photo can have two main subjects. The original people, sky and combined checks are also available.
+Choose **分析 → 六类题材主次** to analyze people, sky, architecture, city, flowers and natural landscapes together. Whole-frame content, visible area, position and local detail determine each subject's role. A photo can have two main subjects. The original people, sky and combined checks are also available.
 
-Under **筛选 → AI 建议**, select a subject to see main subjects first, followed by secondary and background matches. Ties follow the current sort order. The details pane shows all assigned roles. Multiple filters support AND and OR. Legacy detections follow ranked matches until the six-subject analysis is run for that photo. Results are stored in the local catalog separately from manual tags. Canceling keeps completed results. JPEG, PNG, and NEF files with embedded previews are supported.
+Under **筛选 → AI 题材**, select a subject to see main subjects first, followed by secondary and background matches. Ties follow the current sort order. The details pane shows all assigned roles. Multiple filters support AND and OR. Legacy detections follow ranked matches until the six-subject analysis is run for that photo. Results are stored in the local catalog separately from manual tags. Canceling keeps completed results. JPEG, PNG, and NEF files with embedded previews are supported.
 
-**扫描新文件** reuses records with matching file sizes and modification times. Use **更多 → 全量重扫** or the CLI option `scan --full` to reread files in scope.
+**扫描新文件** reuses records with matching file sizes and modification times. Use **管理照片库 → 全量重扫** or the CLI option `scan --full` to reread files in scope.
 
 This feature uses the optional dependencies in `requirements-ai.txt` and local YOLOX-Tiny and CLIP ViT-B/32 int8 weights under `models/`. An existing cache with the same structure under `.dsh_work/models/` also works. The four relative paths are `yolox_tiny.onnx`, `clip/int8/vision_model_int8.onnx`, `clip/int8/text_model_int8.onnx`, and `clip/tokenizer.json`.
 
