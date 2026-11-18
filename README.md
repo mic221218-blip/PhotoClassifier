@@ -33,8 +33,8 @@ To uninstall, use **Settings → Apps** in Windows.
 
 - PhotoClassifier is **not a Lightroom replacement** — it is the photo analysis
   and filtering tool that runs **before** Lightroom;
-- Classification is stored in a database. Originals stay in place, and
-  confirming an export copies the selected photos to a chosen folder;
+- Classification is stored in a database. Originals stay in place. Confirming an
+  export copies your selection or the current filter results to a chosen folder.
 - Core workflow: `camera → photo folder → PhotoClassifier (scan + analyze +
   filter + export) → Lightroom (post-processing)`.
 
@@ -197,10 +197,6 @@ presented and filtered through the same layer.
 - Check **只看 RAW** at the top of Filters to show only NEF originals.
   It combines with the existing filters. Collapsed timelapse stacks count and
   select only their visible RAW frames.
-- **Export selected photos**. Select NEF, JPEG, or PNG files and click
-  **导出所选照片…** in the selection bar. Choose a folder and confirm to copy
-  the originals. New copies get a numbered name if needed, and originals already
-  in the destination are skipped. Open the export folder to import it into Lightroom.
 - **Sharpness sort (P1)**: a "Sharpness first" button in the result header sorts
   by `blur_score` high to low; a numeric "Sharpness" column; unanalyzed / video /
   failed photos go last; the sort applies to the current view and is not persisted
@@ -215,6 +211,15 @@ presented and filtered through the same layer.
   and support JPEG, PNG and NEF files with embedded JPEG previews;
 - Launch: the desktop shortcut (pointing at `run_gui.pyw`), or
   `python -m src.gui` / `pythonw run_gui.pyw`.
+
+#### Export photos for Lightroom
+
+1. Click **导出…** above the results to export matching photos across all pages. Inside an open timelapse stack, this scope covers the stack. To export only checked photos, click **导出所选照片…** on the selection bar.
+2. Choose a destination folder and optionally enter a subfolder name. Keep the original filenames or select **前缀 + 序号** to use a prefix and sequence number. A NEF and JPEG with the same stem in the same source folder share a number when both are in scope. If a name is taken, you can add a suffix to both names or skip the pair.
+3. Check the destination path, total file count, estimated size and sample filenames, then click **开始导出**. The app copies the original NEF, JPEG and PNG files, skips originals already in the destination and remembers the base folder and naming choice.
+4. To stop, click **取消导出**. The app finishes the current file or pair and keeps completed copies. Use **重试失败项** to retry failed files. Click **打开导出文件夹** to view the copies, then import that folder from Lightroom.
+
+![Photo export dialog showing the scope, destination, naming options and filename preview](docs/ui-images/ui-export.png)
 
 ## Run from source
 
@@ -470,7 +475,7 @@ PhotoClassifier/
 | V3 | Multi-tag system (user tags + rule/quality system tags, unified filtering, batch and undo; CLI + GUI) | ✅ Done (current) |
 | V3.5 | Offline visual recognition | Person and sky filtering available in the desktop preview |
 | V4 | Smart filtering (AND / OR combos of tags + EXIF conditions) | Planned |
-| V5 | Lightroom workflow | Reveal in Explorer, copy paths in bulk, and export selected photos to a folder |
+| V5 | Lightroom workflow | Reveal in Explorer, copy paths in bulk, and export selected photos or all filtered results to a folder. XMP keyword export is planned |
 | V6 | GUI (pulled forward: shell implemented — folder library, scan progress, detail panel; Tkinter for now, PySide6 to be evaluated when the environment allows) | 🔨 Shell implemented |
 
 The [V3.5 validation and performance report](docs/v3.5-validation.zh-CN.md) records the current desktop behavior and the original experiments.

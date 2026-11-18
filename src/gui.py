@@ -271,13 +271,23 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
     def _paths_for_row(self, iid: str) -> tuple[str, ...]:
         return self._timelapse_paths.get(iid, (iid,))
 
-    def export_selected_photos(self) -> None:
-        sources = [info.path for info in self._selected_infos() if is_supported(info.category)]
-        if not sources:
-            return
-        chosen = filedialog.askdirectory(parent=self.root, title="选择导出文件夹", mustexist=True)
-        if chosen:
-            PhotoExportDialog(self, sources, Path(chosen))
+    def open_export_dialog(self, *, selected_first: bool = False) -> None:
+        results = []
+        for iid in self._result_iids:
+            for path in self._paths_for_row(iid):
+                info = self.infos_by_iid[path]
+                if is_supported(info.category):
+                    results.append(info)
+        if results:
+            selected = [info for info in results if str(info.path) in self._selected_iids]
+            PhotoExportDialog(self, selected, results, selected_first=selected_first and bool(selected))
+
+    def _update_export_button(self) -> None:
+        enabled = self.result_frame.winfo_manager() and any(
+            is_supported(self.infos_by_iid[path].category)
+            for iid in self._result_iids for path in self._paths_for_row(iid)
+        )
+        self.btn_export_results.config(state="normal" if enabled else "disabled")
 
     def start_result_selection(self) -> None:
         if self._selecting_results or not self.result_tree.get_children():
@@ -501,6 +511,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         return [path for path in folders if not self.checked_folders or str(path) in self.checked_folders]
 
     def _update_scan_controls(self, busy: str = "") -> None:
+        self._update_export_button()
         has_folders = bool(self._folder_paths)
         scope = self._scan_paths(self._folder_paths)
         if self.checked_folders:
@@ -887,6 +898,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self.btn_result_next.pack(side="left", padx=(5, 10), before=self.page_status)
         self.page_status.config(text=f"第 {self._result_page + 1} / {pages} 页" if pages > 1 else "")
         self.btn_select_results.config(state="normal" if self._result_iids else "disabled")
+        self._update_export_button()
         title = self._folder_label(Path(self._browse_folder)) if self._browse_folder else "全部照片"
         stack = self._timelapses.get(self._opened_timelapse_id)
         if stack is not None:

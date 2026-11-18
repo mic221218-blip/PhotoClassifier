@@ -689,7 +689,11 @@ def test_export_button_copies_the_cross_page_selection_after_confirmation(root, 
 
         app.btn_export.invoke()
         dialog, = (widget for widget in root.winfo_children() if isinstance(widget, gui.PhotoExportDialog))
-        assert dialog._heading["text"] == "将复制 2 个照片文件"
+        assert dialog._scope.get() == "selected"
+        assert dialog._summary["text"].startswith("2 个照片文件")
+        dialog._scope.set("results")
+        assert dialog._summary["text"].startswith("3 个照片文件")
+        assert dialog._action["state"] == "disabled"
         assert not list(destination.iterdir())
         dialog._close_button.invoke()
         assert not dialog.winfo_exists()
@@ -697,15 +701,39 @@ def test_export_button_copies_the_cross_page_selection_after_confirmation(root, 
 
         app.btn_export.invoke()
         dialog, = (widget for widget in root.winfo_children() if isinstance(widget, gui.PhotoExportDialog))
+        dialog._browse_button.invoke()
+        dialog._subfolder.set("../outside")
+        assert dialog._action["state"] == "disabled"
+        dialog._subfolder.set("精选")
+        dialog._naming.set("numbered")
+        dialog._prefix.set("album")
+        assert dialog._example_names["text"].splitlines() == ["album_001.NEF", "album_002.PNG"]
+        files[2].unlink()
         dialog._action.invoke()
         deadline = time.monotonic() + 5
         while dialog._running and time.monotonic() < deadline:
             root.update()
             time.sleep(0.01)
-        assert dialog._detail["text"] == "成功 2  ·  跳过 0  ·  失败 0"
-        assert {path.name: path.read_bytes() for path in destination.iterdir()} == {
-            path.name: path.read_bytes() for path in (files[0], files[2])
+        assert dialog._detail["text"].endswith("成功 1  ·  跳过 0  ·  失败 1")
+        assert dialog._retry_button.winfo_manager()
+        assert "找不到源文件" in dialog._failure_text.get("1.0", "end")
+        files[2].write_bytes(b"restored photo")
+        dialog._retry_button.invoke()
+        deadline = time.monotonic() + 5
+        while dialog._running and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        assert dialog._detail["text"].endswith("成功 2  ·  跳过 0  ·  失败 0")
+        assert {path.name: path.read_bytes() for path in (destination / "精选").iterdir()} == {
+            "album_001.NEF": files[0].read_bytes(),
+            "album_002.PNG": files[2].read_bytes(),
         }
+        dialog._close_button.invoke()
+        app.btn_export_results.invoke()
+        dialog, = (widget for widget in root.winfo_children() if isinstance(widget, gui.PhotoExportDialog))
+        assert dialog._scope.get() == "results"
+        assert dialog._destination == destination
+        assert dialog._prefix.get() == "album"
     finally:
         app.tag_store.close()
         app.quality_store.close()
@@ -753,11 +781,11 @@ def test_raw_filter_preserves_timelapse_folding_and_limits_stack_selection(root,
         assert str(card.info.path) in raw_frames
         assert card.title == app.detail_name["text"] == "延时 · 4 帧"
         assert {str(info.path) for info in app._selected_infos()} == set(raw_frames)
-        export_sources = []
-        monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **_kwargs: str(tmp_path))
-        monkeypatch.setattr(gui, "PhotoExportDialog", lambda _app, sources, _destination: export_sources.extend(sources))
-        app.btn_export.invoke()
-        assert set(export_sources) == {Path(path) for path in raw_frames}
+        export_scopes = []
+        monkeypatch.setattr(gui, "PhotoExportDialog",
+                            lambda _app, selected, results, **_kwargs: export_scopes.extend((selected, results)))
+        app.btn_export_results.invoke()
+        assert [{str(info.path) for info in scope} for scope in export_scopes] == [set(raw_frames), set(raw_frames)]
 
         app.cancel_result_selection()
         app._focus_gallery_photo(stack_id)

@@ -296,8 +296,10 @@ class PanelsMixin:
         self.gallery_title.pack(side="left")
         self.count_label = tk.Label(header, text="", bg=WIN_BG, fg=TEXT_SUB, font=self._font(9))
         self.count_label.pack(side="left", padx=(12, 0))
+        self.btn_export_results = self._button(header, "导出…", self.open_export_dialog)
+        self.btn_export_results.pack(side="right")
         self.btn_sort_quality = self._button(header, "清晰度优先", self.toggle_quality_sort)
-        self.btn_sort_quality.pack(side="right")
+        self.btn_sort_quality.pack(side="right", padx=(0, 4))
 
         # 扫描进度视图（扫描时显示，平时隐藏）
         self.progress_frame = tk.Frame(center, bg=WIN_BG)
@@ -429,7 +431,9 @@ class PanelsMixin:
         self.btn_ai.pack(side="left", padx=(0, 4), pady=5)
         self.btn_pick = self._button(self.selection_actions, "标记精选", self.toggle_picked, disabled=True)
         self.btn_pick.pack(side="left", padx=(0, 4), pady=5)
-        self.btn_export = self._button(self.selection_actions, "导出所选照片…", self.export_selected_photos)
+        self.btn_export = self._button(
+            self.selection_actions, "导出所选照片…", lambda: self.open_export_dialog(selected_first=True),
+        )
         self.btn_export.pack(side="left", pady=5)
         self.btn_cancel_selection = self._button(self.selection_actions, "清除选择", self.cancel_result_selection)
         self.btn_cancel_selection.pack(side="right", padx=(0, 8), pady=5)
