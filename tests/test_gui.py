@@ -18,6 +18,7 @@ import pytest
 import src.gui as gui
 from src.gui import PhotoClassifierApp
 from src.quality import ANALYZER_VERSION, FLAG_IDS, QualityMeasurement
+from src.scanner import classify_file
 from src.tags import PICK_TAG_NAME
 
 from exif_maker import nikon_z6iii_nef
@@ -611,6 +612,119 @@ def test_scan_folds_timelapse_and_selects_all_source_frames(root, db_path, tmp_p
         assert set(app.result_tree.get_children()) == burst
         app.quick_filter_buttons["all"].invoke()
         assert set(app.result_tree.get_children()) == {stack_iid, *burst}
+    finally:
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
+def test_raw_filter_check_and_summary_in_both_views(root, db_path, tmp_path) -> None:
+    names = ("photo.NEF", "photo.JPG", "photo.PNG", "video.MOV", "video.NLOG", "notes.txt")
+    photos = [make_info(tmp_path / name, category=classify_file(name), iso=6400) for name in names]
+    raw_path = str(photos[0].path)
+    app = PhotoClassifierApp(root, db_path)
+    try:
+        app.db.add_folder(tmp_path)
+        app.db.upsert_many(photos)
+        app.refresh_library()
+        app.refresh_results()
+        all_rows = app.result_tree.get_children()
+        assert set(all_rows) == {str(photo.path) for photo in photos}
+
+        app.btn_filters.invoke()
+        check = app.raw_filter_check
+        assert app.filter_panel.pack_slaves()[1] is check
+        off_color = check["bg"]
+        check.invoke()
+        assert check["bg"] != off_color
+        assert app.result_tree.get_children() == (raw_path,)
+        assert [photo.tile_id for photo in app.gallery._items] == [raw_path]
+        app.set_result_view("list")
+        assert app.result_tree.item(raw_path, "values")[:2] == ("photo.NEF", "NEF")
+
+        app.btn_filters.invoke()
+        raw_chip, = app.filter_chips.winfo_children()
+        assert raw_chip["text"] == "只看 RAW ×"
+
+        app.and_mode.set(False)
+        app.rule_vars["high_iso"].set(True)
+        app.rule_vars["slow_shutter"].set(True)
+        app._on_filter_changed()
+        assert app.result_tree.get_children() == (raw_path,)
+        app.toggle_picked(photos[:2])
+        app.quick_filter_buttons["picked"].invoke()
+        assert app.result_tree.get_children() == (raw_path,)
+
+        app.btn_clear_active.invoke()
+        assert not app.raw_only.get()
+        assert check["bg"] == off_color
+        assert app.result_tree.get_children() == all_rows
+        assert not app.active_filter_row.winfo_manager()
+    finally:
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
+def test_raw_filter_preserves_timelapse_folding_and_limits_stack_selection(root, db_path, tmp_path) -> None:
+    from datetime import datetime, timedelta
+
+    start = datetime(2026, 9, 18, 6, 10)
+    photos = []
+    raw_frames = []
+    for index in range(12):
+        taken_at = (start + timedelta(seconds=index * 5)).isoformat(sep=" ")
+        for folder in ("mixed", "jpeg_only"):
+            path = tmp_path / folder / f"DSC_{index:04}.JPG"
+            photos.append(make_info(path, category="jpeg", taken_at=taken_at))
+        if index in (1, 4, 7, 10):
+            path = tmp_path / "mixed" / f"DSC_{index:04}.NEF"
+            photos.append(make_info(path, taken_at=taken_at))
+            raw_frames.append(str(path))
+    single = make_info(tmp_path / "single.NEF")
+    photos.append(single)
+
+    app = PhotoClassifierApp(root, db_path)
+    try:
+        app.db.add_folder(tmp_path)
+        app.db.upsert_many(photos)
+        app.refresh_library()
+        app.quick_filter_buttons["timelapse"].invoke()
+        stacks = app.gallery._items
+        assert len(stacks) == 2
+        mixed = next(photo for photo in stacks if photo.info.path.parent.name == "mixed")
+        stack_id = mixed.tile_id
+        assert mixed.info.category == "jpeg"
+        assert mixed.title == "延时 · 12 帧"
+
+        app._focus_gallery_photo(stack_id)
+        app.select_focused_timelapse()
+        assert len(app._selected_infos()) == 16
+
+        app.raw_filter_check.invoke()
+        card, = app.gallery._items
+        assert card.tile_id == stack_id
+        assert str(card.info.path) in raw_frames
+        assert card.title == app.detail_name["text"] == "延时 · 4 帧"
+        assert {str(info.path) for info in app._selected_infos()} == set(raw_frames)
+
+        app.cancel_result_selection()
+        app._focus_gallery_photo(stack_id)
+        app.select_focused_timelapse()
+        assert {str(info.path) for info in app._selected_infos()} == set(raw_frames)
+        app.cancel_result_selection()
+        app._focus_gallery_photo(stack_id)
+        app.toggle_focused_timelapse()
+        assert app.result_tree.get_children() == tuple(raw_frames)
+        assert app.gallery_title["text"] == "延时 · 4 帧"
+        app.btn_leave_timelapse.invoke()
+        assert app.result_tree.get_children() == (stack_id,)
+
+        app.quick_filter_buttons["cull"].invoke()
+        assert app.result_tree.get_children() == (str(single.path),)
+        app.btn_fold_timelapse.invoke()
+        app.quick_filter_buttons["timelapse"].invoke()
+        assert set(app.result_tree.get_children()) == set(raw_frames)
     finally:
         app.tag_store.close()
         app.quality_store.close()

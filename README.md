@@ -195,6 +195,9 @@ presented and filtered through the same layer.
   and Duplicate Groups, or use Cull Group (筛选组) to browse photos outside of
   timelapse stacks. The Filters panel includes rules, quality flags, custom tags
   and AI suggestions. Run quality analysis from More;
+- Check **只看 RAW** at the top of Filters to show only NEF originals.
+  It combines with the existing filters. Collapsed timelapse stacks count and
+  select only their visible RAW frames.
 - **Sharpness sort (P1)**: a "Sharpness first" button in the result header sorts
   by `blur_score` high to low; a numeric "Sharpness" column; unanalyzed / video /
   failed photos go last; the sort applies to the current view and is not persisted

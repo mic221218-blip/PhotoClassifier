@@ -44,6 +44,7 @@ from src.shell import open_in_explorer, open_with_default_app
 from src.ui_theme import (  # noqa: E402  (主题常量集中管理)
     ACCENT,
     ACCENT_DIM,
+    ACCENT_SOFT,
     BORDER_SOFT,
     CARD_BG,
     DEFAULT_DB,
@@ -90,6 +91,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._rule_cache: dict[str, list[RuleMatch]] = {}
         self._matched_iids: list[str] = []
         self._result_iids: list[str] = []
+        self._catalog_timelapses: tuple[TimelapseStack, ...] = ()
+        self._timelapses_raw_only = False
         self._timelapses: dict[str, TimelapseStack] = {}
         self._timelapse_paths: dict[str, tuple[str, ...]] = {}
         self._timelapse_by_path: dict[str, str] = {}
@@ -117,6 +120,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self.active_quality: set[str] = set()
         self.active_tags: set[int] = set()
         self.and_mode = tk.BooleanVar(value=True)
+        self.raw_only = tk.BooleanVar(value=False)
         self.gps_only = tk.BooleanVar(value=False)
         self.quality_ok_var = tk.BooleanVar(value=False)
         self.sort_mode = SORT_DEFAULT
@@ -596,8 +600,17 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         previous_infos = self.infos_by_iid
         previous_rules = self._rule_cache
         self.infos_by_iid = {str(info.path): info for info in photos}
-        if previous_infos != self.infos_by_iid:
-            self._timelapses = {stack.id: stack for stack in detect_timelapse(photos)}
+        selected_filters = self._filter_selection()
+        catalog_changed = previous_infos != self.infos_by_iid
+        if catalog_changed:
+            self._catalog_timelapses = detect_timelapse(photos)
+        if catalog_changed or self._timelapses_raw_only != selected_filters.raw_only:
+            self._timelapses_raw_only = selected_filters.raw_only
+            stacks = self._catalog_timelapses
+            if selected_filters.raw_only:
+                raw_stacks = (stack.only_raw() for stack in stacks)
+                stacks = tuple(stack for stack in raw_stacks if stack is not None)
+            self._timelapses = {stack.id: stack for stack in stacks}
             self._timelapse_paths = {
                 stack.id: tuple(str(info.path) for info in stack.members)
                 for stack in self._timelapses.values()
@@ -619,7 +632,6 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
                 )
             )
 
-        selected_filters = self._filter_selection()
         picked = self.tag_controller.get_by_name(PICK_TAG_NAME)
         self._matched_iids = []
         for info in photos:
@@ -828,7 +840,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             empty = "添加文件夹，开始整理照片"
         elif self._quick_filter in ("issues", "duplicates") and not self.measurements_by_path:
             empty = "从「更多 → 质量分析」分析照片后，可以在这里复核结果。"
-        elif self._quick_filter == "timelapse" and not self._timelapses:
+        elif self._quick_filter == "timelapse" and not self._catalog_timelapses:
             empty = "这个范围里还没有识别到延时序列"
         elif self._quick_filter != "all" or not self._filter_selection().is_empty:
             empty = "没有符合当前筛选条件的照片"
@@ -1017,6 +1029,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             quality_ids=frozenset(self.active_quality),
             tag_ids=frozenset(self.active_tags),
             and_mode=self.and_mode.get(),
+            raw_only=self.raw_only.get(),
             gps_only=self.gps_only.get(),
             quality_ok=self.quality_ok_var.get(),
             ai_person_only=self.person_filter.get(),
@@ -1080,9 +1093,15 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self.btn_filters.config(text="收起筛选")
 
     def _show_active_filters(self) -> None:
+        raw_only = self.raw_only.get()
+        self.raw_filter_check.config(
+            bg=ACCENT_DIM if raw_only else ACCENT_SOFT,
+            highlightbackground=ACCENT if raw_only else ACCENT_DIM,
+        )
         filters = [
             (label, lambda var=var: self._clear_filter_var(var))
             for label, var in (
+                ("只看 RAW", self.raw_only),
                 *((label, self.rule_vars[key]) for key, label, _en, _fn in RULE_REGISTRY),
                 *((FLAG_LABELS[key], var) for key, var in self.quality_vars.items()),
                 ("有 GPS", self.gps_only),
@@ -1101,7 +1120,11 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             return
         for child in self.filter_chips.winfo_children():
             child.destroy()
-        self.filter_summary.config(text="同时满足" if self.and_mode.get() else "满足其一")
+        if self.and_mode.get():
+            summary = "同时满足"
+        else:
+            summary = "其他条件满足其一" if raw_only else "满足其一"
+        self.filter_summary.config(text=summary if len(filters) > int(raw_only) else "")
         for label, clear in filters[:2]:
             short_label = label if len(label) <= 12 else label[:11] + "…"
             self._button(self.filter_chips, f"{short_label} ×", clear).pack(side="left", padx=(0, 4))
@@ -1128,6 +1151,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             var.set(False)
         for var in self.quality_vars.values():
             var.set(False)
+        self.raw_only.set(False)
         self.gps_only.set(False)
         self.quality_ok_var.set(False)
         self.person_filter.set(False)

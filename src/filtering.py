@@ -1,6 +1,6 @@
 """PhotoClassifier V3：统一筛选判定。
 
-规则（EXIF）、质量标记、用户标签、GPS 都进入同一个 :class:`FilterSelection`，
+文件类型、规则（EXIF）、质量标记、用户标签、GPS 都进入同一个 :class:`FilterSelection`，
 GUI 与 CLI 都只调用 :func:`matches`，不再各自实现一份 AND/OR。
 """
 
@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from src.photo_info import PhotoInfo
+from src.scanner import CATEGORY_NEF
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class FilterSelection:
     quality_ok: bool = False
     ai_person_only: bool = False
     ai_sky_only: bool = False
+    raw_only: bool = False
 
     @property
     def selected_count(self) -> int:
@@ -35,6 +37,7 @@ class FilterSelection:
             + int(self.quality_ok)
             + int(self.ai_person_only)
             + int(self.ai_sky_only)
+            + int(self.raw_only)
         )
 
     @property
@@ -52,6 +55,7 @@ class FilterSelection:
         quality_ok: bool | None = None,
         ai_person_only: bool | None = None,
         ai_sky_only: bool | None = None,
+        raw_only: bool | None = None,
     ) -> "FilterSelection":
         return FilterSelection(
             rule_ids=self.rule_ids if rule_ids is None else frozenset(rule_ids),
@@ -64,6 +68,7 @@ class FilterSelection:
             quality_ok=self.quality_ok if quality_ok is None else bool(quality_ok),
             ai_person_only=self.ai_person_only if ai_person_only is None else bool(ai_person_only),
             ai_sky_only=self.ai_sky_only if ai_sky_only is None else bool(ai_sky_only),
+            raw_only=self.raw_only if raw_only is None else bool(raw_only),
         )
 
 
@@ -79,11 +84,13 @@ def matches(
 ) -> bool:
     """照片是否满足当前筛选条件。
 
-    - GPS 是额外硬条件；
+    - RAW 和 GPS 是额外硬条件；
     - 规则/质量/标签合并成一个集合：``and_mode`` 为真要求全部命中，
       否则任意命中即可；
-    - 没有选择任何条件时全部通过（GPS 除外）。
+    - 没有选择集合条件时，只检查额外条件。
     """
+    if selection.raw_only and info.category != CATEGORY_NEF:
+        return False
     if selection.gps_only and not info.has_gps:
         return False
 

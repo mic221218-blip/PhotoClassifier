@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from itertools import groupby, pairwise
 from pathlib import Path
@@ -44,6 +44,18 @@ class TimelapseStack:
     @property
     def members(self) -> tuple[PhotoInfo, ...]:
         return tuple(photo for frame in self.frames for photo in frame.members)
+
+    def only_raw(self) -> TimelapseStack | None:
+        """保留原序列的标识和节奏，用可见的 RAW 帧生成叠卡。"""
+        frames = []
+        for frame in self.frames:
+            members = tuple(photo for photo in frame.members if photo.category == CATEGORY_NEF)
+            if members:
+                frames.append(TimelapseFrame(frame.taken_at, members))
+        if not frames:
+            return None
+        cover = frames[len(frames) // 2].members[0]
+        return replace(self, frames=tuple(frames), cover=cover)
 
 
 @dataclass(frozen=True)

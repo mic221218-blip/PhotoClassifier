@@ -11,6 +11,7 @@ from src.ui_gallery import PhotoGallery
 from src.ui_theme import (
     ACCENT,
     ACCENT_DIM,
+    ACCENT_SOFT,
     BORDER_SOFT,
     CARD_BG,
     GREEN,
@@ -119,6 +120,14 @@ class PanelsMixin:
         tk.Label(panel, text="筛选", bg=PANEL_BG, fg=TEXT, font=self._font(11, bold=True)).pack(
             anchor="w", padx=16, pady=(12, 6)
         )
+        self.raw_filter_check = tk.Checkbutton(
+            panel, text="只看 RAW", variable=self.raw_only, command=self._on_filter_changed,
+            bg=ACCENT_SOFT, fg=TEXT, activebackground=ACCENT_DIM, activeforeground=TEXT,
+            selectcolor=INPUT_BG, highlightbackground=ACCENT_DIM, highlightcolor=ACCENT,
+            highlightthickness=1, relief="flat", bd=0, anchor="w", padx=8, pady=5,
+            font=self._font(10, bold=True),
+        )
+        self.raw_filter_check.pack(fill="x", padx=12, pady=(0, 10))
         tk.Label(
             panel, text="自动标签（EXIF 规则）", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9, bold=True)
         ).pack(anchor="w", padx=16, pady=(0, 6))
