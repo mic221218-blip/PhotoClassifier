@@ -1,4 +1,5 @@
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 from src import photo_export
 
@@ -103,3 +104,48 @@ def test_cancel_finishes_current_pair_and_retry_preserves_assigned_name(tmp_path
     assert [outcome.status for outcome in retry.outcomes] == ["copied"]
     assert sorted(path.name for path in destination.iterdir()) == ["album_00001.JPG", "album_00001.NEF"]
     assert (destination / "album_00001.JPG").read_bytes() == jpg.read_bytes()
+
+
+def test_nef_keywords_reserve_sidecar_names_for_the_whole_pair(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    raw, jpeg = source / "pair.NEF", source / "pair.JPG"
+    raw.write_bytes(b"raw")
+    jpeg.write_bytes(b"jpeg")
+    dest = tmp_path / "export"
+    dest.mkdir()
+    existing = dest / "album_00001.xmp"
+    existing.write_bytes(b"existing")
+    keywords = {raw: ("城市 & 建筑", "<待精修>"), jpeg: ("ignored",)}
+    groups = tuple(photo_export.name_export_groups([(raw, jpeg)], "album", keywords=keywords))
+
+    skipped = photo_export.export_photos(groups, dest, skip_existing=True)
+    assert [o.status for o in skipped.outcomes] == ["skipped", "skipped"]
+    result = photo_export.export_photos(groups, dest)
+    assert [o.file.name for o in result.outcomes] == ["album_00001 (2).NEF", "album_00001 (2).JPG"]
+    assert existing.read_bytes() == b"existing"
+    assert (dest / result.outcomes[0].file.name).read_bytes() == raw.read_bytes()
+    sidecar = dest / "album_00001 (2).xmp"
+    items = ET.parse(sidecar).findall(".//{http://www.w3.org/1999/02/22-rdf-syntax-ns#}li")
+    assert [item.text for item in items] == list(keywords[raw])
+    assert not list(source.glob("*.xmp"))
+
+
+def test_nef_retry_leaves_existing_destination_intact_if_publish_conflicts(tmp_path):
+    source = tmp_path / "source.NEF"
+    source.write_bytes(b"raw")
+    dest = tmp_path / "export"
+    dest.mkdir()
+    occupied = dest / source.name
+    occupied.write_bytes(b"existing photo")
+    groups = tuple(photo_export.name_export_groups([(source,)], keywords={source: ("关键词",)}))
+
+    failed = photo_export.export_photos(groups, dest, keep_names=True)
+    assert [outcome.status for outcome in failed.outcomes] == ["failed"]
+    assert list(dest.iterdir()) == [occupied]
+    assert occupied.read_bytes() == b"existing photo"
+    occupied.unlink()
+    retried = photo_export.export_photos(((failed.outcomes[0].file,),), dest, keep_names=True)
+    assert [outcome.status for outcome in retried.outcomes] == ["copied"]
+    assert occupied.read_bytes() == b"raw"
+    assert occupied.with_suffix(".xmp").is_file()

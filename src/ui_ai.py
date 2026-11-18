@@ -4,15 +4,15 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 
 from src.database import PhotoDatabase
 from src.person_ai import analyze_selection as analyze_person_selection
 from src.photo_info import PhotoInfo
-from src.preview import is_supported
+from src.photo_scope import supported_photos
 from src.scene_ai import ROLE_NAMES, SUBJECTS, Role, analyze_selection as analyze_scene_selection
 from src.sky_ai import analyze_selection as analyze_sky_selection
-from src.ui_theme import ACCENT, INPUT_BG, TEXT_FAINT
+from src.ui_theme import ACCENT, INPUT_BG, PANEL_BG, TEXT_FAINT, TEXT_SUB
 
 
 class AIAnalysisMixin:
@@ -23,6 +23,9 @@ class AIAnalysisMixin:
         self.person_results: dict[str, bool] = {}
         self.sky_results: dict[str, bool] = {}
         self.scene_results: dict[str, dict[str, int]] = {}
+        self.scene_current_paths: set[str] = set()
+        self._ai_scope_photos: list[PhotoInfo] = []
+        self._ai_scope_count = self._ai_scope_ready = 0
         self.ai_thread: threading.Thread | None = None
         self.ai_cancel = threading.Event()
         self.ai_queue: queue.Queue = queue.Queue()
@@ -71,14 +74,54 @@ class AIAnalysisMixin:
                 anchor = detail
 
     def _update_ai_button(self) -> None:
-        count = sum(is_supported(self.infos_by_iid[iid].category) for iid in self._selected_iids)
+        count = len(supported_photos(self.infos_by_iid[iid] for iid in self._selected_iids))
         label = f"分析（{count:,} 张）" if count and count < len(self._selected_iids) else "分析"
         self.btn_ai.config(text=f"{label} ▾", bg=ACCENT if count else INPUT_BG)
+        busy = self._analysis_busy()
         for entry in ("六类题材主次", "人物和天空", "人物", "天空"):
-            self.ai_menu.entryconfigure(entry, state="normal" if count else "disabled")
+            self.ai_menu.entryconfigure(entry, state="normal" if count and not busy else "disabled")
         self.ai_menu.entryconfigure(
-            self.ai_target_entry, label=f"AI 分析 · {count:,} 张" if count else "先多选照片，再运行 AI",
+            self.ai_target_entry, label=f"已选照片 · {count:,} 张" if count else "多选照片后可单独分析",
         )
+        self._update_scope_analysis_button()
+
+    def _analysis_busy(self) -> bool:
+        return any(worker is not None for worker in (self.ai_thread, self.scan_thread, self.analyze_thread))
+
+    def _update_ai_coverage(self, photos: list[PhotoInfo]) -> None:
+        self._ai_scope_photos = [] if self.opened_pick_list else supported_photos(photos)
+        self._ai_scope_count = len(self._ai_scope_photos)
+        self._ai_scope_ready = sum(str(info.path) in self.scene_current_paths for info in self._ai_scope_photos)
+        pending = self._ai_scope_count - self._ai_scope_ready
+        legacy = sum(str(info.path) in self.scene_results for info in self._ai_scope_photos) - self._ai_scope_ready
+        older = f"（含旧版 {legacy:,} 张）" if legacy else ""
+        coverage = (f"本版已分析 {self._ai_scope_ready:,}/{self._ai_scope_count:,} 张\n待分析 {pending:,} 张{older}"
+                    if self._ai_scope_count else "此范围暂无可分析照片")
+        self.ai_coverage.config(text=coverage, justify="left")
+        self._update_scope_analysis_button()
+
+    def _update_scope_analysis_button(self) -> None:
+        scope = "当前文件夹" if self._browse_folder else ("当前项目" if self.active_project else "全部图库")
+        text = f"分析{scope}"
+        state = "normal" if self._ai_scope_count and not self.opened_pick_list and not self._analysis_busy() else "disabled"
+        self.btn_analyze_scope.config(text=text, state=state)
+        self.ai_menu.entryconfigure(self.ai_scope_entry, label=f"{text}…", state=state)
+
+    def start_scope_scene_analysis(self) -> None:
+        if self._analysis_busy() or not self._ai_scope_photos or self.opened_pick_list:
+            return
+        if self._browse_folder:
+            label = f"{self._browse_folder}（含子文件夹）"
+        else:
+            label = f"项目「{self.active_project.name}」" if self.active_project else "全部图库"
+        infos = tuple(self._ai_scope_photos)
+        if messagebox.askyesno(
+            "六类题材分析",
+            f"{label}\n\n共有 {len(infos):,} 张可分析照片，已有 {self._ai_scope_ready:,} 张六类题材结果。\n"
+            "已有结果会复用。分析期间可以继续选片。\n\n开始分析？",
+            parent=self.root,
+        ):
+            self._start_ai_analysis((("六类题材主次", analyze_scene_selection),), infos)
 
     def start_person_analysis(self) -> None:
         self._start_ai_analysis((("人物", analyze_person_selection),))
@@ -92,41 +135,45 @@ class AIAnalysisMixin:
     def start_scene_analysis(self) -> None:
         self._start_ai_analysis((("六类题材主次", analyze_scene_selection),))
 
-    def _start_ai_analysis(self, analyses) -> None:
-        if not self._selecting_results or any(
-            worker is not None for worker in (self.ai_thread, self.scan_thread, self.analyze_thread)
-        ):
+    def _start_ai_analysis(self, analyses, infos=None) -> None:
+        if self._analysis_busy():
             return
-        infos = [info for info in self._selected_infos() if is_supported(info.category)]
+        if infos is None:
+            if not self._selecting_results:
+                return
+            infos = supported_photos(self._selected_infos())
         if not infos:
             return
         label = "和".join(name for name, _ in analyses)
         self.ai_cancel.clear()
-        self._set_ai_progress(True, f"{label} · {len(infos):,} 张")
         self.ai_thread = threading.Thread(target=self._ai_worker, args=(analyses, infos), daemon=True)
+        self._set_ai_progress(True, f"{label} · {len(infos):,} 张")
         self.ai_thread.start()
         self.root.after(100, self._poll_ai_queue, label)
 
+    def _build_ai_progress(self, parent) -> None:
+        self.ai_progress = bar = tk.Frame(parent, bg=PANEL_BG)
+        self.ai_progress_text = tk.Label(bar, bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9))
+        self.ai_progress_text.pack(side="left", padx=(8, 6))
+        self.ai_progress_bar = ttk.Progressbar(bar, mode="determinate")
+        self.ai_progress_bar.pack(side="left", fill="x", expand=True, padx=6)
+        self.btn_cancel_ai = self._button(bar, "取消分析", self.cancel_ai_analysis)
+        self.btn_cancel_ai.pack(side="right", padx=(6, 8), pady=4)
+
     def _set_ai_progress(self, running: bool, detail: str = "") -> None:
         if running:
-            self.result_frame.pack_forget()
-            self.progress_frame.pack(fill="both", expand=True)
-            self.progress_bar.config(value=0)
-            self.progress_title.config(text="正在分析选中的照片")
-            self.progress_folder.config(text=detail)
-            self.progress_detail.config(text="")
-            self.progress_current.config(text="正在准备照片……")
-            self.btn_cancel.config(command=self.cancel_ai_analysis)
-            self._update_scan_controls("AI 分析中…")
+            self.ai_progress_text.config(text=detail)
+            self.ai_progress_bar.config(value=0)
+            self.btn_cancel_ai.config(state="normal")
+            self.ai_progress.pack(side="bottom", fill="x", padx=12, pady=4)
         else:
-            self.progress_frame.pack_forget()
-            self.result_frame.pack(fill="both", expand=True)
-            self.btn_cancel.config(command=self.cancel_scan)
-            self._update_scan_controls()
+            self.ai_progress.pack_forget()
+        self._update_scan_controls()
 
     def cancel_ai_analysis(self) -> None:
         self.ai_cancel.set()
-        self.progress_current.config(text="正在取消，已完成的结果会保留。")
+        self.ai_progress_text.config(text="正在取消，已完成的结果会保留")
+        self.btn_cancel_ai.config(state="disabled")
 
     def _ai_worker(self, analyses, infos) -> None:
         reports = []
@@ -164,22 +211,24 @@ class AIAnalysisMixin:
                 if kind == "stage":
                     name, stage, stages, count = message
                     text = f"第 {stage} / {stages} 项 · " if stages > 1 else ""
-                    self.progress_folder.config(text=f"{text}{name} AI · {count:,} 张")
-                    self.progress_detail.config(text=f"0 / {count:,}")
                     if not self.ai_cancel.is_set():
-                        self.progress_current.config(text="正在准备照片……")
+                        self.ai_progress_text.config(text=f"{text}{name} · 0 / {count:,} 张")
                     continue
                 if kind == "progress":
-                    total_done, total_work, done, count, name = message
-                    self.progress_bar.config(value=total_done * 100 / total_work)
-                    self.progress_detail.config(text=f"{done:,} / {count:,}")
+                    total_done, total_work, done, count, _name = message
+                    self.ai_progress_bar.config(value=total_done * 100 / total_work)
                     if not self.ai_cancel.is_set():
-                        self.progress_current.config(text=name)
+                        self.ai_progress_text.config(text=f"{label} · {done:,} / {count:,} 张")
                     continue
 
+                focus = self._focus_iid if self._focus_iid in self.result_tree.get_children() else ""
+                grid_scroll, list_scroll = self.gallery.yview()[0], self.result_tree.yview()[0]
                 self.ai_thread = None
                 self._set_ai_progress(False)
                 self.refresh_results()
+                if focus in self._result_iids:
+                    self._show_focused_result_page(focus)
+                self._restore_result_position(focus, grid_scroll, list_scroll)
                 if kind == "error":
                     messagebox.showerror(f"{label}分析失败", message[0])
                     return

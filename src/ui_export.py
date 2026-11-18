@@ -55,6 +55,17 @@ class PhotoExportDialog(tk.Toplevel):
         self._folder, prefix = _load_settings(self._settings_file)
         self._groups = {scope: group_export_sources(info.path for info in photos)
                         for scope, photos in (("selected", selected), ("results", results))}
+        app._ensure_tag_cache()
+        self._keywords = {
+            info.path: keywords
+            for info in results if info.path.suffix.lower() == ".nef"
+            if (keywords := tuple(tag.name for tag in app.tag_controller.tags_for_path(str(info.path))
+                                  if tag.kind == "user"))
+        }
+        self._sidecar_counts = {
+            scope: sum(path in self._keywords for group in groups for path in group)
+            for scope, groups in self._groups.items()
+        }
         self._counts = {"selected": len(selected), "results": len(results)}
         self._sizes = {"selected": sum(info.size_bytes for info in selected),
                        "results": sum(info.size_bytes for info in results)}
@@ -63,6 +74,7 @@ class PhotoExportDialog(tk.Toplevel):
         self._prefix = tk.StringVar(self, value=prefix)
         self._naming = tk.StringVar(self, value="numbered" if prefix else "original")
         self._collision = tk.StringVar(self, value="rename")
+        self._include_keywords = tk.BooleanVar(self, value=False)
         self._updates: SimpleQueue[tuple[int, str] | ExportResult | Exception] = SimpleQueue()
         self._outcomes: dict[Path, ExportOutcome] = {}
         self._failed: tuple[ExportGroup, ...] = ()
@@ -103,7 +115,7 @@ class PhotoExportDialog(tk.Toplevel):
         self._close_button = app._button(self._footer, "关闭", self._close)
         self._close_button.pack(side="right", padx=(0, 8))
         self._retry_button = app._button(self._footer, "重试失败项", self._retry)
-        for variable in (self._scope, self._naming, self._prefix, self._subfolder):
+        for variable in (self._scope, self._naming, self._prefix, self._subfolder, self._include_keywords):
             variable.trace_add("write", self._update_preview)
         self._update_preview()
         self.minsize(590, 1)
@@ -176,8 +188,17 @@ class PhotoExportDialog(tk.Toplevel):
         radio(collision, self._collision, "rename", "自动加编号")
         radio(collision, self._collision, "skip", "跳过同名文件")
 
-        label(5, "导出预览")
-        preview = controls(5)
+        label(5, "关键词")
+        keywords = controls(5)
+        self._keywords_check = tk.Checkbutton(
+            keywords, text="把 NEF 的手动标签导出为 XMP", variable=self._include_keywords,
+            bg=PANEL_BG, fg=TEXT, activebackground=PANEL_BG, activeforeground=TEXT,
+            selectcolor=INPUT_BG, disabledforeground=TEXT_FAINT, font=app._font(10),
+        )
+        self._keywords_check.pack(anchor="w")
+
+        label(6, "导出预览")
+        preview = controls(6)
         self._summary = self._label(preview, app)
         self._summary.pack(anchor="w")
         self._example_names = self._label(preview, app, size=9, wraplength=390)
@@ -185,7 +206,7 @@ class PhotoExportDialog(tk.Toplevel):
         self._example_names.pack(anchor="w", pady=(4, 0))
         self._form_error = self._label(form, app, wraplength=540)
         self._form_error.config(fg=ORANGE)
-        self._form_error.grid(row=6, column=0, columnspan=2, sticky="w")
+        self._form_error.grid(row=7, column=0, columnspan=2, sticky="w")
 
     def _choose_folder(self) -> None:
         chosen = filedialog.askdirectory(parent=self, title="选择导出文件夹", initialdir=str(self._folder or Path.home()),
@@ -207,8 +228,12 @@ class PhotoExportDialog(tk.Toplevel):
             error = "请输入有效的文件名前缀。"
         self._destination = self._folder / subfolder if self._folder and not error else None
         self._path_preview.config(text=str(self._destination or self._folder or "请选择目标文件夹"))
-        self._summary.config(text=f"{self._counts[scope]:,} 个照片文件  ·  约 {format_size(self._sizes[scope])}")
-        examples = (file.name for group in name_export_groups(self._groups[scope], prefix) for file in group)
+        sidecars = self._sidecar_counts[scope]
+        self._keywords_check.config(state="normal" if sidecars else "disabled")
+        sidecar_text = f"  ·  {sidecars:,} 份 XMP" if sidecars and self._include_keywords.get() else ""
+        self._summary.config(text=f"{self._counts[scope]:,} 个照片文件  ·  约 {format_size(self._sizes[scope])}{sidecar_text}")
+        examples = (name for group in self._named_groups(scope, prefix)
+                    for file in group for name in (file.name, file.sidecar_name) if name)
         self._example_names.config(text="\n".join(islice(examples, 3)) if not error else "")
         self._form_error.config(text=error)
         can_export = bool(self._destination and self._counts[scope])
@@ -244,7 +269,12 @@ class PhotoExportDialog(tk.Toplevel):
             _save_settings(self._settings_file, self._folder, prefix)
         except OSError:
             self._settings_saved = False
-        self._run(tuple(name_export_groups(self._groups[scope], prefix)))
+        self._run(tuple(self._named_groups(scope, prefix)))
+
+    def _named_groups(self, scope: str, prefix: str):
+        return name_export_groups(
+            self._groups[scope], prefix, keywords=self._keywords if self._include_keywords.get() else None,
+        )
 
     def _retry(self) -> None:
         self._run(self._failed, keep_names=True)
@@ -314,6 +344,9 @@ class PhotoExportDialog(tk.Toplevel):
         heading = "导出中断" if isinstance(result, Exception) else ("导出已取消" if cancelled else "导出完成")
         self._heading.config(text=heading, fg=TEXT if failed or heading != "导出完成" else GREEN)
         summary = f"成功 {copied:,}  ·  跳过 {skipped:,}  ·  失败 {len(failed):,}"
+        sidecars = sum(outcome.status == "copied" and bool(outcome.file.sidecar_name) for outcome in self._outcomes.values())
+        if sidecars:
+            summary += f"  ·  XMP {sidecars:,}"
         if remaining := self._total_files - len(self._outcomes):
             summary += f"  ·  未处理 {remaining:,}"
         if not self._settings_saved:

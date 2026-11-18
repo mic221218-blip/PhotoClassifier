@@ -118,6 +118,7 @@ class PanelsMixin:
         all_results = self._button(section, "全部结果", lambda: self.set_quick_filter("all"))
         all_results.pack(fill="x", pady=(3, 0))
         self.quick_filter_buttons = {"all": all_results}
+        self._build_projects(panel)
         self._build_pick_lists(panel)
         self._build_filters(panel)
 
@@ -136,6 +137,7 @@ class PanelsMixin:
         tk.Label(panel, text="筛选", bg=PANEL_BG, fg=TEXT, font=self._font(11, bold=True)).pack(
             anchor="w", padx=12, pady=(8, 6)
         )
+        self._build_filter_presets(panel)
         self.raw_filter_check = tk.Checkbutton(
             panel, text="只看 RAW", variable=self.raw_only, command=self._on_filter_changed,
             bg=ACCENT_SOFT, fg=TEXT, activebackground=ACCENT_DIM, activeforeground=TEXT,
@@ -155,6 +157,10 @@ class PanelsMixin:
                 bg=PANEL_BG, fg=TEXT, activebackground=PANEL_BG, activeforeground=TEXT,
                 selectcolor=INPUT_BG, font=self._font(9),
             ).grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 6))
+        self.ai_coverage = tk.Label(panel, bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9), anchor="w")
+        self.ai_coverage.pack(fill="x", padx=12)
+        self.btn_analyze_scope = self._button(panel, "分析当前文件夹", self.start_scope_scene_analysis)
+        self.btn_analyze_scope.pack(anchor="w", padx=12, pady=(2, 8))
 
         logic = tk.Frame(panel, bg=PANEL_BG)
         logic.pack(fill="x", padx=12)
@@ -347,6 +353,7 @@ class PanelsMixin:
         self.page_status.pack(side="left")
         self._build_selection_bar()
         self._build_pick_actions(self.result_frame)
+        self._build_ai_progress(self.result_frame)
 
         viewport = tk.Frame(self.result_frame, bg=WIN_BG)
         viewport.pack(fill="both", expand=True)
@@ -423,6 +430,8 @@ class PanelsMixin:
         self.btn_ai, self.ai_menu = self._menu_button(controls, "分析 ▾")
         self.btn_ai.pack(side="left")
         self.ai_menu.add_command(label="质量分析…", command=self.start_analysis)
+        self.ai_menu.add_command(label="分析当前文件夹…", command=self.start_scope_scene_analysis)
+        self.ai_scope_entry = self.ai_menu.index("end")
         self.ai_menu.add_separator()
         self.ai_menu.add_command(label="先多选照片，再运行 AI", state="disabled")
         self.ai_target_entry = self.ai_menu.index("end")

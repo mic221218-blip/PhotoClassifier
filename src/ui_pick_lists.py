@@ -68,7 +68,7 @@ class PickListsMixin:
         tk.Label(row, text="加入到", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9)).pack(side="right", padx=6)
 
     def refresh_pick_lists(self) -> None:
-        lists = self.db.list_pick_lists()
+        lists = self.db.list_pick_lists(project_id=self._project_id)
         self._pick_lists = {item.id: item for item in lists}
         if self._active_pick_id not in self._pick_lists:
             self._active_pick_id = lists[0].id if lists else None
@@ -148,23 +148,14 @@ class PickListsMixin:
         if filters_open:
             self.toggle_filters()
         if restore_position:
-            if focus in self.result_tree.get_children():
-                self._focus_gallery_photo(focus)
-            self.result_tree.yview_moveto(list_scroll)
-            folder = self._browse_folder
-
-            def restore_grid_scroll():
-                if self._opened_pick_id is None and self._browse_folder == folder and self._result_page == page:
-                    self.gallery.scroll("moveto", grid_scroll)
-
-            self.gallery.after_idle(restore_grid_scroll)
+            self._restore_result_position(focus, grid_scroll, list_scroll)
 
     def create_pick_list(self) -> None:
         name = simpledialog.askstring("新建选片清单", "清单名称", parent=self.root)
         if name is None:
             return
         try:
-            self._active_pick_id = self.db.create_pick_list(name)
+            self._active_pick_id = self.db.create_pick_list(name, project_id=self._project_id)
         except ValueError as exc:
             messagebox.showerror("新建选片清单", str(exc), parent=self.root)
             return

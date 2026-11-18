@@ -1773,3 +1773,197 @@ def test_pick_lists_overlap_and_export_across_folders(root, db_path, tmp_path, m
         app.tag_store.close()
         app.quality_store.close()
         app.db.close()
+
+
+def test_projects_scope_export_and_restore_the_last_workspace(root, db_path, tmp_path, monkeypatch):
+    parent = tmp_path / "travel"
+    nested = parent / "second-camera"
+    sports = tmp_path / "sports"
+    raw = make_info(parent / "a.NEF")
+    jpeg = make_info(nested / "b.JPG", category="jpeg")
+    other = make_info(sports / "c.NEF")
+    with gui.PhotoDatabase.open(db_path) as db:
+        existing_lists = {item.id for item in db.list_pick_lists()}
+        for folder in (parent, nested, sports):
+            db.add_folder(folder)
+        db.upsert_many((raw, jpeg, other))
+        travel_id = db.save_project("旅行", map(str, (parent, nested)))
+        sports_id = db.save_project("运动会", map(str, (nested, sports)))
+        album_id = db.create_pick_list("待修", project_id=travel_id)
+        delivery_id = db.create_pick_list("交付", project_id=travel_id)
+        sports_list = db.create_pick_list("运动会交付", project_id=sports_id)
+
+    exported = []
+    monkeypatch.setattr(gui, "PhotoExportDialog",
+                        lambda _app, _selected, photos, **kwargs: exported.append((photos, kwargs["results_label"])))
+    app = PhotoClassifierApp(tk.Toplevel(root), db_path)
+    try:
+        assert app.active_project is None
+        app.switch_project(travel_id)
+        assert set(app._result_iids) == {str(raw.path), str(jpeg.path)}
+        app.pick_target.set("交付")
+        app._on_pick_target_select()
+        app.add_to_pick_list([raw, jpeg])
+        app.raw_only.set(True)
+        app.refresh_results()
+        app.open_export_dialog()
+        photos, title = exported.pop()
+        assert [photo.path for photo in photos] == [raw.path] and "旅行" in title
+        app.start_result_selection()
+        app.toggle_result_page_selection()
+        app.switch_project(sports_id)
+        assert not app.raw_only.get()
+        assert app._active_pick_id == sports_list
+        assert not app._selecting_results and not app.selection_actions.winfo_manager()
+        assert not app.result_tree.selection()
+        assert set(app._result_iids) == {str(jpeg.path), str(other.path)}
+        app.switch_project(travel_id)
+        assert app.raw_only.get()
+        assert app._active_pick_id == delivery_id
+        app.open_pick_list(delivery_id)
+    finally:
+        app._on_close()
+
+    reopened = PhotoClassifierApp(tk.Toplevel(root), db_path)
+    try:
+        assert reopened.active_project.id == travel_id
+        assert reopened.opened_pick_list.id == delivery_id
+        assert reopened.raw_only.get() and reopened._active_pick_id == delivery_id
+        reopened.open_export_dialog()
+        photos, title = exported.pop()
+        assert {photo.path for photo in photos} == {raw.path, jpeg.path} and "交付" in title
+        monkeypatch.setattr("src.ui_workspace.messagebox.askyesno", lambda *_a, **_kw: True)
+        reopened.remove_project()
+        assert reopened.active_project is None
+        assert reopened.db.pick_list_paths(delivery_id) == {str(raw.path), str(jpeg.path)}
+        assert {item.id for item in reopened.db.list_pick_lists()} == existing_lists | {album_id, delivery_id, sports_list}
+    finally:
+        reopened._on_close()
+
+
+def test_analyze_current_folder_checks_all_pages_and_keeps_selection_available(root, db_path, tmp_path, monkeypatch):
+    from src import scene_ai, ui_ai
+
+    folder = tmp_path / "shoot"
+    outside = tmp_path / "outside"
+    raws = [make_info(folder / f"{index:04}.NEF") for index in range(gui.RESULT_PAGE_SIZE + 1)]
+    jpeg = make_info(folder / "sub" / "b.JPG", category="jpeg")
+    video = make_info(folder / "v.MOV", category="video")
+    other = make_info(outside / "z.NEF")
+    with gui.PhotoDatabase.open(db_path) as db:
+        db.add_folder(folder)
+        db.add_folder(outside)
+        db.upsert_many([*raws, jpeg, video, other])
+        target = db.create_pick_list("待导出")
+    received = []
+    started = threading.Event()
+
+    def run(infos, db, *, progress, cancelled):
+        received.append({info.path for info in infos})
+        if len(received) == 1:
+            db.save_scene_result(infos[0], scene_ai.MODEL_VERSION, 1, {"building": scene_ai.Role.PRIMARY})
+            progress(1, len(infos), infos[0].file_name)
+            started.set()
+            deadline = time.monotonic() + 3
+            while not cancelled() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            return 1, 0, 0, None
+        for info in infos[1:]:
+            db.save_scene_result(info, scene_ai.MODEL_VERSION, 1, {})
+        return len(infos) - 1, 1, 0, None
+
+    monkeypatch.setattr(ui_ai, "analyze_scene_selection", run)
+    monkeypatch.setattr(ui_ai.messagebox, "askyesno", lambda *_args, **_kwargs: True)
+    app = PhotoClassifierApp(tk.Toplevel(root), db_path)
+
+    def wait_for_analysis():
+        deadline = time.monotonic() + 5
+        while app.ai_thread is not None and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        assert app.ai_thread is None
+
+    try:
+        app.browse_folder(str(folder))
+        app.pick_target.set("待导出")
+        app._on_pick_target_select()
+        app.raw_only.set(True)
+        app.refresh_results()
+        app.start_scope_scene_analysis()
+        assert started.wait(3)
+        assert app.result_frame.winfo_manager() and app.ai_progress.winfo_manager()
+        assert received == [{*(info.path for info in raws), jpeg.path}]
+        app._focus_gallery_photo(str(raws[0].path))
+        app._on_pick_key()
+        assert app.db.pick_list_paths(target) == {str(raws[0].path)}
+        app.btn_cancel_ai.invoke()
+        wait_for_analysis()
+        assert app._ai_scope_ready == 1
+        app.start_scope_scene_analysis()
+        wait_for_analysis()
+        assert app._ai_scope_ready == len(raws) + 1
+        assert "已分析 1" in app.status_left["text"]
+    finally:
+        app._on_close()
+
+
+def test_filter_preset_applies_to_the_current_folder_and_survives_restart(root, db_path, tmp_path, monkeypatch):
+    one, two = tmp_path / "one", tmp_path / "two"
+    raw = make_info(two / "a.NEF")
+    with gui.PhotoDatabase.open(db_path) as db:
+        db.add_folder(one)
+        db.add_folder(two)
+        db.upsert_many([make_info(one / "b.NEF"), make_info(two / "c.JPG", category="jpeg"), raw])
+    monkeypatch.setattr("src.ui_workspace.simpledialog.askstring", lambda *_args, **_kw: "待修原片")
+    app = PhotoClassifierApp(tk.Toplevel(root), db_path)
+    try:
+        app.browse_folder(str(one))
+        app.raw_only.set(True)
+        app.save_filter_preset()
+    finally:
+        app._on_close()
+    app = PhotoClassifierApp(tk.Toplevel(root), db_path)
+    try:
+        app.browse_folder(str(two))
+        app.clear_filters()
+        app.apply_filter_preset("待修原片")
+        assert app.raw_only.get()
+        assert app._result_iids == [str(raw.path)]
+    finally:
+        app._on_close()
+
+
+def test_export_dialog_includes_manual_keywords_only_when_enabled(root, db_path, tmp_path, monkeypatch):
+    source = tmp_path / "shoot"
+    source.mkdir()
+    raw = source / "a.NEF"
+    raw.write_bytes(b"raw contents")
+    with gui.PhotoDatabase.open(db_path) as db:
+        db.add_folder(source)
+        db.upsert_photo(make_info(raw))
+    destination = tmp_path / "export"
+    destination.mkdir()
+    monkeypatch.setattr("src.ui_export.filedialog.askdirectory", lambda **_kw: str(destination))
+    app = PhotoClassifierApp(tk.Toplevel(root), db_path)
+    try:
+        tag = app.tag_store.ensure_tag("待精修")
+        app.tag_store.add_tags([raw], [tag.id])
+        app.tag_controller.mark_dirty()
+        app.open_export_dialog()
+        dialog, = (widget for widget in app.root.winfo_children() if isinstance(widget, gui.PhotoExportDialog))
+        assert not dialog._include_keywords.get()
+        assert "XMP" not in dialog._summary["text"]
+        dialog._keywords_check.invoke()
+        assert "1 份 XMP" in dialog._summary["text"]
+        assert "a.xmp" in dialog._example_names["text"]
+        dialog._browse_button.invoke()
+        dialog._action.invoke()
+        deadline = time.monotonic() + 5
+        while dialog._running and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        assert (destination / raw.name).read_bytes() == raw.read_bytes()
+        assert "待精修" in (destination / "a.xmp").read_text(encoding="utf-8")
+        assert not raw.with_suffix(".xmp").exists()
+    finally:
+        app._on_close()

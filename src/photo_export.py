@@ -4,18 +4,24 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path, PureWindowsPath
 from tempfile import TemporaryDirectory
 from typing import Literal
+from xml.etree import ElementTree as ET
 
 
 @dataclass(frozen=True)
 class ExportFile:
     source: Path
     name: str
+    keywords: tuple[str, ...] = ()
+
+    @property
+    def sidecar_name(self) -> str | None:
+        return Path(self.name).with_suffix(".xmp").name if self.keywords else None
 
 
 ExportGroup = tuple[ExportFile, ...]
@@ -61,11 +67,17 @@ def group_export_sources(sources: Iterable[Path]) -> tuple[tuple[Path, ...], ...
                  for source in ordered if source not in paired_later)
 
 
-def name_export_groups(groups: Iterable[tuple[Path, ...]], prefix: str = "") -> Iterator[ExportGroup]:
+def name_export_groups(
+    groups: Iterable[tuple[Path, ...]], prefix: str = "", *,
+    keywords: Mapping[Path, tuple[str, ...]] | None = None,
+) -> Iterator[ExportGroup]:
+    by_path = keywords or {}
     for sequence, group in enumerate(groups, 1):
         stem = f"{prefix}_{sequence:05d}"
-        yield tuple(ExportFile(source, f"{stem}{source.suffix}" if prefix else source.name)
-                    for source in group)
+        yield tuple(ExportFile(
+            source, f"{stem}{source.suffix}" if prefix else source.name,
+            by_path.get(source, ()) if source.suffix.lower() == ".nef" else (),
+        ) for source in group)
 
 
 def _choose_names(
@@ -79,7 +91,7 @@ def _choose_names(
         else:
             named = tuple(replace(file, name=f"{Path(file.name).stem} ({number}){Path(file.name).suffix}")
                           for file in group)
-        targets = {destination / file.name for file in named}
+        targets = {destination / name for file in named for name in (file.name, file.sidecar_name) if name}
         if not targets.intersection(reserved) and not any(os.path.lexists(path) for path in targets):
             reserved.update(targets)
             return named
@@ -93,10 +105,45 @@ def _copy_original(source: Path, target: Path) -> None:
     with TemporaryDirectory(prefix=".photoclassifier-", dir=target.parent) as staging:
         staged = Path(staging) / "photo"
         shutil.copyfile(source, staged)
-        if os.name == "nt":
-            staged.rename(target)  # Windows rename fails if the target exists.
-        else:
-            os.link(staged, target)
+        _publish(staged, target)
+
+
+def _publish(staged: Path, target: Path) -> None:
+    if os.name == "nt":
+        staged.rename(target)  # Windows rename fails if the target exists.
+    else:
+        os.link(staged, target)
+
+
+def _write_keywords_sidecar(path: Path, keywords: tuple[str, ...]) -> None:
+    meta = ET.Element("x:xmpmeta", {"xmlns:x": "adobe:ns:meta/"})
+    rdf = ET.SubElement(meta, "rdf:RDF", {"xmlns:rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#"})
+    description = ET.SubElement(rdf, "rdf:Description", {"rdf:about": "", "xmlns:dc": "http://purl.org/dc/elements/1.1/"})
+    subject = ET.SubElement(description, "dc:subject")
+    bag = ET.SubElement(subject, "rdf:Bag")
+    for keyword in keywords:
+        ET.SubElement(bag, "rdf:li").text = keyword
+    ET.ElementTree(meta).write(path, encoding="utf-8", xml_declaration=True)
+
+
+def _copy_with_sidecar(file: ExportFile, destination: Path, sidecar_name: str) -> None:
+    with TemporaryDirectory(prefix=".photoclassifier-", dir=destination) as staging:
+        raw = Path(staging) / "photo"
+        xmp = Path(staging) / "sidecar"
+        shutil.copyfile(file.source, raw)
+        _write_keywords_sidecar(xmp, file.keywords)
+        sidecar = destination / sidecar_name
+        staged_stat = xmp.stat()
+        _publish(xmp, sidecar)
+        try:
+            _publish(raw, destination / file.name)
+        except OSError:
+            try:
+                if os.path.samestat(staged_stat, sidecar.stat()):
+                    sidecar.unlink(missing_ok=True)
+            except FileNotFoundError:
+                pass
+            raise
 
 
 def _export_group(
@@ -124,7 +171,10 @@ def _export_group(
             if same_folder:
                 yield ExportOutcome(file, "skipped")
             else:
-                _copy_original(file.source, destination / file.name)
+                if sidecar_name := file.sidecar_name:
+                    _copy_with_sidecar(file, destination, sidecar_name)
+                else:
+                    _copy_original(file.source, destination / file.name)
                 yield ExportOutcome(file, "copied")
         except OSError as exc:
             yield ExportOutcome(file, "failed", str(exc))

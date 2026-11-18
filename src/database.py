@@ -215,10 +215,32 @@ BEGIN
 END;
 """
 
-_SCHEMA = _SCHEMA + QUALITY_SCHEMA + TAGS_SCHEMA + PERSON_SCHEMA + SKY_SCHEMA + SCENE_SCHEMA + PICK_LIST_SCHEMA
+PROJECT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS projects (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    name     TEXT NOT NULL,
+    name_key TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS project_folders (
+    project_id INTEGER NOT NULL,
+    path       TEXT NOT NULL,
+    PRIMARY KEY (project_id, path)
+);
+CREATE TABLE IF NOT EXISTS project_pick_lists (
+    list_id    INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS desktop_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
+_SCHEMA = (_SCHEMA + QUALITY_SCHEMA + TAGS_SCHEMA + PERSON_SCHEMA + SKY_SCHEMA + SCENE_SCHEMA
+           + PICK_LIST_SCHEMA + PROJECT_SCHEMA)
 
 #: 当前 schema 版本（写入 ``PRAGMA user_version``，为后续迁移留钩子）。
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True)
@@ -226,6 +248,12 @@ class PickList:
     id: int
     name: str
     photo_count: int
+
+
+@dataclass(frozen=True)
+class Project:
+    id: int
+    name: str
 
 #: 按 path 去重的写入语句（列清单固定，编译一次即可）。
 _UPSERT_SQL = """
@@ -511,6 +539,7 @@ class PhotoDatabase:
         """从文件夹库移除一个文件夹（不删除照片记录，更不碰原片）。"""
         key = resolve_key(path)
         with self._conn:
+            self._conn.execute("DELETE FROM project_folders WHERE path = ?", (key,))
             self._conn.execute("DELETE FROM folders WHERE path = ?", (key,))
 
     def remove_photos(self, paths: Iterable[str | Path]) -> int:
@@ -533,22 +562,29 @@ class PhotoDatabase:
                 removed += int(cursor.rowcount or 0)
         return removed
 
-    def list_pick_lists(self) -> list[PickList]:
-        rows = self._conn.execute("""
+    def list_pick_lists(self, *, project_id: int | None = None) -> list[PickList]:
+        scope = "" if project_id is None else (
+            "WHERE EXISTS (SELECT 1 FROM project_pick_lists x WHERE x.list_id = pl.id AND x.project_id = ?)"
+        )
+        rows = self._conn.execute(f"""
             SELECT pl.id, pl.name, COUNT(m.path) AS photo_count
             FROM pick_lists pl LEFT JOIN pick_list_photos m ON m.list_id = pl.id
+            {scope}
             GROUP BY pl.id ORDER BY pl.id
-        """)
+        """, () if project_id is None else (project_id,))
         return [PickList(row["id"], row["name"], row["photo_count"]) for row in rows]
 
-    def create_pick_list(self, name: str) -> int:
+    def create_pick_list(self, name: str, *, project_id: int | None = None) -> int:
         name = _pick_list_name(name)
         try:
             with self._conn:
                 cursor = self._conn.execute(
                     "INSERT INTO pick_lists (name, name_key) VALUES (?, ?)", (name, name.casefold()),
                 )
-                return int(cursor.lastrowid)
+                list_id = int(cursor.lastrowid)
+                if project_id is not None:
+                    self._assign_pick_list(list_id, project_id)
+                return list_id
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"清单「{name}」已存在") from exc
 
@@ -564,8 +600,84 @@ class PhotoDatabase:
 
     def delete_pick_list(self, list_id: int) -> None:
         with self._conn:
+            self._conn.execute("DELETE FROM project_pick_lists WHERE list_id = ?", (list_id,))
             self._conn.execute("DELETE FROM pick_list_photos WHERE list_id = ?", (list_id,))
             self._conn.execute("DELETE FROM pick_lists WHERE id = ?", (list_id,))
+
+    def list_projects(self) -> list[Project]:
+        return [Project(row["id"], row["name"]) for row in
+                self._conn.execute("SELECT id, name FROM projects ORDER BY id")]
+
+    def save_project(self, name: str, folders: Iterable[str], *, project_id: int | None = None) -> int:
+        name = name.strip()
+        if not name:
+            raise ValueError("请输入项目名称。")
+        try:
+            with self._conn:
+                if project_id is None:
+                    cursor = self._conn.execute(
+                        "INSERT INTO projects (name, name_key) VALUES (?, ?)", (name, name.casefold()),
+                    )
+                    project_id = int(cursor.lastrowid)
+                else:
+                    cursor = self._conn.execute(
+                        "UPDATE projects SET name = ?, name_key = ? WHERE id = ?", (name, name.casefold(), project_id),
+                    )
+                    if not cursor.rowcount:
+                        raise ValueError("找不到该项目。")
+                    self._conn.execute("DELETE FROM project_folders WHERE project_id = ?", (project_id,))
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO project_folders SELECT ?, path FROM folders WHERE path = ?",
+                    ((project_id, folder) for folder in folders),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"项目「{name}」已存在。") from exc
+        return project_id
+
+    def project_folder_paths(self, project_id: int) -> set[str]:
+        rows = self._conn.execute("SELECT path FROM project_folders WHERE project_id = ?", (project_id,))
+        return {row["path"] for row in rows}
+
+    def set_project_folder(self, project_id: int, folder: str, *, attached: bool) -> None:
+        with self._conn:
+            if attached:
+                self._conn.execute("""
+                    INSERT OR IGNORE INTO project_folders
+                    SELECT p.id, f.path FROM projects p, folders f WHERE p.id = ? AND f.path = ?
+                """, (project_id, folder))
+            else:
+                self._conn.execute(
+                    "DELETE FROM project_folders WHERE project_id = ? AND path = ?", (project_id, folder),
+                )
+
+    def assign_pick_list(self, list_id: int, project_id: int) -> None:
+        with self._conn:
+            self._assign_pick_list(list_id, project_id)
+
+    def _assign_pick_list(self, list_id: int, project_id: int) -> None:
+        self._conn.execute("""
+            INSERT INTO project_pick_lists (list_id, project_id)
+            SELECT l.id, p.id FROM pick_lists l, projects p WHERE l.id = ? AND p.id = ?
+            ON CONFLICT(list_id) DO UPDATE SET project_id = excluded.project_id
+        """, (list_id, project_id))
+
+    def remove_project(self, project_id: int) -> None:
+        with self._conn:
+            self._conn.execute("DELETE FROM project_folders WHERE project_id = ?", (project_id,))
+            self._conn.execute("DELETE FROM project_pick_lists WHERE project_id = ?", (project_id,))
+            self._conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+
+    def desktop_setting(self, key: str) -> dict:
+        row = self._conn.execute("SELECT value FROM desktop_settings WHERE key = ?", (key,)).fetchone()
+        value = json.loads(row["value"]) if row else {}
+        return value if isinstance(value, dict) else {}
+
+    def write_desktop_setting(self, key: str, value: dict) -> None:
+        with self._conn:
+            self._conn.execute("""
+                INSERT INTO desktop_settings (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, (key, json.dumps(value, ensure_ascii=False)))
 
     def pick_list_paths(self, list_id: int | None) -> set[str]:
         if list_id is None:
@@ -608,6 +720,9 @@ class PhotoDatabase:
     def scene_results(self, version: str, *compatible_versions: str) -> dict[str, dict[str, int]]:
         rows = self._ai_rows("photo_scene_ai", "roles", version, *compatible_versions)
         return {row["path"]: json.loads(row["roles"]) for row in rows}
+
+    def scene_result_paths(self, version: str) -> set[str]:
+        return {row["path"] for row in self._ai_rows("photo_scene_ai", "roles", version)}
 
     def _ai_rows(self, table: str, column: str, version: str, *compatible_versions: str):
         versions = (version, *compatible_versions)

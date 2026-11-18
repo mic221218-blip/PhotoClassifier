@@ -9,8 +9,9 @@ from src.person_ai import PersonAnalyzer
 from src.preview import load_color_preview
 from src.sky_ai import SkyAnalyzer
 
-PREVIOUS_MODEL_VERSION = "clip-segformer-yolox-subjects-v1"
-MODEL_VERSION = "clip-segformer-yolox-subjects-v2"
+MODEL_VERSION = "clip-segformer-yolox-subjects-v3"
+PREVIOUS_MODEL_VERSION = "clip-segformer-yolox-subjects-v2"
+COMPATIBLE_MODEL_VERSIONS = (PREVIOUS_MODEL_VERSION, "clip-segformer-yolox-subjects-v1")
 SUBJECTS = {"person": "人物", "sky": "天空", "building": "建筑", "city": "城市",
             "flowers": "花卉", "landscape": "风光"}
 
@@ -150,6 +151,18 @@ def _share_primary(first: str, second: str, scores: dict[str, float], spatial: d
     return balanced_regions or (balanced_composition and score_gap <= 0.23)
 
 
+def _landmark_and_landscape(evidence: dict[str, Evidence], composition: dict[str, float]) -> bool:
+    """A modest landmark can share the focus with a substantial foreground or setting."""
+    building, landscape = evidence["building"], evidence["landscape"]
+    return (
+        building.area >= 0.04 and building.center >= 0.10 and building.detail >= 0.085
+        and 0.375 <= landscape.area <= 0.86 and landscape.detail >= 0.46
+        and composition["building"] >= 0.240 and composition["landscape"] >= 0.228
+        and abs(composition["building"] - composition["landscape"]) <= 0.022
+        and composition["city"] < composition["building"]
+    )
+
+
 def rank_subjects(evidence: dict[str, Evidence], person_detected: bool,
                   composition: dict[str, float] | None = None) -> dict[str, Role]:
     """Assign roles independently of which filters the viewer has selected."""
@@ -182,6 +195,12 @@ def rank_subjects(evidence: dict[str, Evidence], person_detected: bool,
     primary_candidates = {first}
     if len(ordered) >= 2 and _share_primary(first, ordered[1], scores, spatial, composition):
         primary_candidates.add(ordered[1])
+    landmark_pair = {"building", "landscape"}
+    if (composition is not None and allow_primary and first in landmark_pair
+            and landmark_pair <= scores.keys() and _landmark_and_landscape(evidence, composition)):
+        primary_candidates = landmark_pair
+        for key in landmark_pair:
+            scores[key] = max(scores[key], 0.43)
     for key in ordered:
         score = scores[key]
         if allow_primary and key in primary_candidates and score >= 0.43:

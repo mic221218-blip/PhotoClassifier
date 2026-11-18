@@ -16,6 +16,7 @@ from src.filtering import FilterSelection, matches as selection_matches
 from src.formatting import format_shutter, format_size
 from src.person_ai import MODEL_VERSION as PERSON_MODEL_VERSION
 from src.photo_info import EXIF_ERROR, PhotoInfo
+from src.photo_scope import photos_at_paths, result_paths, supported_photos
 from src.preview import PILLOW_AVAILABLE, is_supported
 from src.quality import (
     FLAG_LABELS,
@@ -29,7 +30,7 @@ from src.quality_store import QualityStore
 from src.rules import RULE_REGISTRY, RuleEngine, RuleMatch
 from src.sky_ai import MODEL_VERSION as SKY_MODEL_VERSION
 from src.scene_ai import MODEL_VERSION as SCENE_MODEL_VERSION, ROLE_NAMES, SUBJECTS, Role
-from src.scene_ai import PREVIOUS_MODEL_VERSION as PREVIOUS_SCENE_VERSION
+from src.scene_ai import COMPATIBLE_MODEL_VERSIONS as COMPATIBLE_SCENE_VERSIONS
 from src.tag_controller import TagController
 from src.tag_store import Tag, TagStore
 from src.timelapse import TimelapseStack, detect_timelapse
@@ -41,6 +42,7 @@ from src.ui_panels import PanelsMixin
 from src.ui_tag_dialogs import TagDialogsMixin
 from src.ui_thumbnail import PreviewCanvas, ThumbnailMixin
 from src.ui_pick_lists import PickListsMixin
+from src.ui_workspace import WorkspaceMixin
 from src.scan_catalog import scan_catalog
 from src.shell import open_in_explorer, open_with_default_app
 
@@ -68,7 +70,9 @@ from src.ui_theme import (  # noqa: E402  (主题常量集中管理)
 RESULT_PAGE_SIZE = 250
 
 
-class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMixin, ThumbnailMixin, PickListsMixin):
+class PhotoClassifierApp(
+    PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMixin, ThumbnailMixin, PickListsMixin, WorkspaceMixin,
+):
     """主窗口应用。``root`` 由调用方创建，方便测试与自检。"""
 
     def __init__(self, root: tk.Tk, db_path: str | Path = DEFAULT_DB):
@@ -118,6 +122,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self.analyze_report = None
         self._init_ai_analysis()
         self._init_pick_lists()
+        self._init_workspace()
 
         self.rule_engine = RuleEngine()
         self.quality_engine = QualityEngine()
@@ -145,10 +150,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._build_detail_panel()
         self._build_center()
 
-        self.set_result_view("grid", focus=False)
-        self.refresh_library()
         self.refresh_tags()
-        self.refresh_results()
+        self._restore_workspace_view()
         self.refresh_status_bar()
         self.root.bind_all("<MouseWheel>", self._on_mousewheel)
         self.root.bind_all("<Control-z>", lambda _event: self.undo_last_tag_operation())
@@ -268,30 +271,35 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
 
     def _selected_infos(self) -> list[PhotoInfo]:
         iids = self._selected_iids if self._selecting_results else self.result_tree.selection()
-        return [self.infos_by_iid[iid] for iid in sorted(iids) if iid in self.infos_by_iid]
+        return photos_at_paths(sorted(iids), self.infos_by_iid)
 
     def _paths_for_row(self, iid: str) -> tuple[str, ...]:
         return self._timelapse_paths.get(iid, (iid,))
 
     def open_export_dialog(self, *, selected_first: bool = False) -> None:
-        results = []
-        for iid in self._result_iids:
-            for path in self._paths_for_row(iid):
-                info = self.infos_by_iid[path]
-                if is_supported(info.category):
-                    results.append(info)
+        results = supported_photos(photos_at_paths(
+            result_paths(self._result_iids, self._timelapse_paths), self.infos_by_iid,
+        ))
         if results:
             selected = [info for info in results if str(info.path) in self._selected_iids]
             pick_list = self.opened_pick_list
+            project = self.active_project
+            label = f"清单「{pick_list.name}」" if pick_list else None
+            if project and not pick_list:
+                scope = "当前延时叠" if self._opened_timelapse_id else "筛选结果（所有页）"
+                source = f"项目「{project.name}」"
+                if self._browse_folder:
+                    source += f" / {self._folder_label(Path(self._browse_folder))}"
+                label = f"{source} · {scope}"
             PhotoExportDialog(
                 self, selected, results, selected_first=selected_first and bool(selected),
-                results_label=f"清单「{pick_list.name}」" if pick_list else None,
+                results_label=label,
             )
 
     def _update_export_button(self) -> None:
         enabled = self.result_frame.winfo_manager() and any(
             is_supported(self.infos_by_iid[path].category)
-            for iid in self._result_iids for path in self._paths_for_row(iid)
+            for path in result_paths(self._result_iids, self._timelapse_paths)
         )
         self.btn_export_results.config(
             state="normal" if enabled else "disabled",
@@ -401,7 +409,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if not messagebox.askyesno(
             "从照片库移除",
             f"将从 PhotoClassifier 移除 {count} 张照片：\n\n{preview}\n\n"
-            "只删除数据库记录，不会删除磁盘文件；重新扫描该文件夹会再次加入。\n\n继续？",
+            "会从关联项目和选片清单中移除这些记录。磁盘文件仍会保留。\n\n继续？",
         ):
             return
         removed_paths = {str(info.path) for info in infos}
@@ -463,7 +471,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
     # ------------------------------------------------------------------ #
 
     def refresh_library(self) -> None:
-        folders = self.db.list_folders()
+        folders = self._catalog_folders()
         self._folder_paths = [folder.path for folder in folders]
         keys = {str(path) for path in self._folder_paths}
         self.checked_folders.intersection_update(keys)
@@ -506,7 +514,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if self.library_tree.selection() != selection:
             self.library_tree.selection_set(selection)
         self.library_tree.focus(folder or "")
-        self.btn_library_all.config(bg=ACCENT_DIM if folder is None and self._opened_pick_id is None else INPUT_BG)
+        self.btn_library_all.config(
+            text="项目全部照片" if self.active_project else "全部照片",
+            bg=ACCENT_DIM if folder is None and self._opened_pick_id is None else INPUT_BG,
+        )
         self.library_menu.entryconfigure(
             "从库中移除当前文件夹…", state="normal" if folder else "disabled",
         )
@@ -528,13 +539,19 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         return [path for path in folders if not self.checked_folders or str(path) in self.checked_folders]
 
     def _update_scan_controls(self, busy: str = "") -> None:
+        if not busy and self.ai_thread is not None:
+            busy = "AI 分析中…"
+        elif not busy and self.scan_thread is not None:
+            busy = "扫描中…"
+        elif not busy and self.analyze_thread is not None:
+            busy = "质量分析中…"
         self._update_export_button()
         has_folders = bool(self._folder_paths)
         scope = self._scan_paths(self._folder_paths)
         if self.checked_folders:
             label = self._folder_label(scope[0]) if len(scope) == 1 else f"{len(scope)} 个文件夹"
         else:
-            label = "全部文件夹"
+            label = "项目文件夹" if self.active_project else "全部文件夹"
         if len(label) > 28:
             label = label[:27] + "…"
         self.scan_scope_label.config(text=f"扫描范围 · {label}" if has_folders else "")
@@ -603,6 +620,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             return
         self.db.add_folder(chosen)
         self._browse_folder = str(Path(chosen).resolve())
+        if self._project_id is not None:
+            self.db.set_project_folder(self._project_id, self._browse_folder, attached=True)
+        if self._opened_pick_id is not None:
+            self.leave_pick_list(restore_position=False)
         self._result_page = 0
         if self._selecting_results:
             self.cancel_result_selection()
@@ -617,12 +638,14 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if folder is None:
             messagebox.showinfo("移除文件夹", "请先在文件夹库中点击选择一个文件夹。")
             return
-        if not messagebox.askyesno(
-            "移除文件夹",
-            "只从文件夹库移除该条目，不删除照片记录，更不会删除原片。\n\n继续移除？\n" + folder,
-        ):
+        prompt = ("从当前项目移除此文件夹？图库和选片清单中的照片会保留。\n\n" if self.active_project else
+                  "从图库及关联项目移除此文件夹？照片记录和原片会保留。\n\n")
+        if not messagebox.askyesno("移除文件夹", prompt + folder):
             return
-        self.db.remove_folder(folder)
+        if self._project_id is not None:
+            self.db.set_project_folder(self._project_id, folder, attached=False)
+        else:
+            self.db.remove_folder(folder)
         self.checked_folders.discard(folder)
         self._result_page = 0
         self._quality_revision += 1
@@ -641,11 +664,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if self._opened_pick_id is not None and pick_list is None:
             self.leave_pick_list()
             return
-        if pick_list:
-            photos = self.db.photos_in_pick_list(pick_list.id)
-        else:
-            folders = [self._browse_folder] if self._browse_folder else [f.path for f in self.db.list_folders()]
-            photos = self.db.find_photos_under(folders)
+        photos = self._view_photos()
         previous_infos = self.infos_by_iid
         previous_rules = self._rule_cache
         self.infos_by_iid = {str(info.path): info for info in photos}
@@ -673,9 +692,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self.matches_by_iid = {}
         self.quality_by_iid = {}
         self._rule_cache = {}
-        self.person_results = self.db.person_results(PERSON_MODEL_VERSION)
-        self.sky_results = self.db.sky_results(SKY_MODEL_VERSION)
-        self.scene_results = self.db.scene_results(SCENE_MODEL_VERSION, PREVIOUS_SCENE_VERSION)
+        if self.ai_thread is None:
+            self.person_results = self.db.person_results(PERSON_MODEL_VERSION)
+            self.sky_results = self.db.sky_results(SKY_MODEL_VERSION)
+            self.scene_results = self.db.scene_results(SCENE_MODEL_VERSION, *COMPATIBLE_SCENE_VERSIONS)
+            self.scene_current_paths = self.db.scene_result_paths(SCENE_MODEL_VERSION)
+        self._update_ai_coverage(photos)
         self._ensure_quality_cache(photos, skip_duplicates=skip_duplicate_rebuild)
         self._ensure_tag_cache()
         if self.sort_mode == SORT_SHARPNESS:
@@ -813,6 +835,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._render_result_page()
         self.result_tree.yview_moveto(0)
 
+    def _show_focused_result_page(self, iid: str) -> None:
+        page = self._result_iids.index(iid) // RESULT_PAGE_SIZE
+        if page != self._result_page:
+            self._result_page = page
+            self._render_result_page()
+
     def _render_result_page(self) -> None:
         start = self._result_page * RESULT_PAGE_SIZE
         page = self._result_iids[start:start + RESULT_PAGE_SIZE]
@@ -901,6 +929,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             empty = "从「分析 → 质量分析」分析照片后，可以在这里复核结果。"
         elif self._quick_filter == "timelapse" and not self._catalog_timelapses:
             empty = "这个范围里还没有识别到延时序列"
+        elif self._filter_selection().selected_ai and self._ai_scope_count:
+            pending = self._ai_scope_count - self._ai_scope_ready
+            empty = (
+                f"暂无匹配。还有 {pending:,} 张待做六类题材分析。"
+                if pending else "当前范围已分析，暂无匹配。"
+            )
         elif self._quick_filter != "all" or not self._filter_selection().is_empty:
             empty = "没有符合当前筛选条件的照片"
         elif self._browse_folder and self.checked_folders and self._browse_folder not in self.checked_folders:
@@ -938,7 +972,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         for button in (self.btn_preview, self.btn_photo_actions, self.btn_select_results):
             button.config(state=state)
         self._update_export_button()
-        title = self._folder_label(Path(self._browse_folder)) if self._browse_folder else "全部照片"
+        title = self.active_project.name if self.active_project else "全部照片"
+        if self._browse_folder:
+            folder = self._folder_label(Path(self._browse_folder))
+            title = f"{title} / {folder}" if self.active_project else folder
         stack = self._timelapses.get(self._opened_timelapse_id)
         pick_list = self.opened_pick_list
         if stack is not None:
@@ -1037,7 +1074,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if skip_duplicates:
             self.duplicates = DuplicateResult()
         else:
-            if self._browse_folder or self.opened_pick_list:
+            if self._browse_folder or self.opened_pick_list or self.active_project:
                 photos = self.db.find_photos_under(f.path for f in self.db.list_folders())
             self.duplicates = rebuild_duplicates(self.quality_store, photos)
         self._quality_cache_revision = self._quality_revision
@@ -1462,7 +1499,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             return
         if self.analyze_thread and self.analyze_thread.is_alive():
             return
-        folders = self._scan_paths([folder.path for folder in self.db.list_folders()])
+        folders = self._scan_paths([folder.path for folder in self._catalog_folders()])
         if not folders:
             messagebox.showinfo("开始扫描", "请先添加一个照片文件夹。")
             return
@@ -1586,7 +1623,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             return
         if self.scan_thread and self.scan_thread.is_alive():
             return
-        folders = self._scan_paths([folder.path for folder in self.db.list_folders()])
+        folders = self._scan_paths([folder.path for folder in self._catalog_folders()])
         if not folders:
             messagebox.showinfo("质量分析", "请先添加一个照片文件夹。")
             return
@@ -1688,16 +1725,21 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self.cancel_event.set()
         self.analyze_cancel.set()
         self.ai_cancel.set()
+        self._cancel_position_restore()
         try:
-            self.db.close()
+            self._remember_workspace()
+            self._save_workspace()
         finally:
             try:
-                self.quality_store.close()
+                self.db.close()
             finally:
                 try:
-                    self.tag_store.close()
+                    self.quality_store.close()
                 finally:
-                    self.root.destroy()
+                    try:
+                        self.tag_store.close()
+                    finally:
+                        self.root.destroy()
 
 
 def _analysis_summary(report) -> str:

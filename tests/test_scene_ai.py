@@ -90,3 +90,19 @@ def test_foreground_landmark_and_an_ensemble_of_buildings_rank_differently():
     skyline["city"] = Evidence(.258, .47, .46, .74)
     roles = rank_subjects(skyline, False, composition(building=.251, city=.296))
     assert roles["building"] == Role.PRIMARY and roles["city"] < Role.PRIMARY
+
+
+def test_prominent_pavilion_can_share_primary_with_a_setting():
+    pavilion = {
+        "building": Evidence(.262, .050, .122, .201),
+        "city": Evidence(.225, .050, .122, .201),
+        "landscape": Evidence(.225, .383, .300, .512),
+        "sky": Evidence(.212, .504, .467, .176),
+    }
+    captions = composition(building=.251, landscape=.230, object=.229, city=.217, sky=.214)
+    roles = rank_subjects(pavilion, False, captions)
+    assert roles["building"] == Role.PRIMARY and roles["landscape"] == Role.PRIMARY
+    assert roles["sky"] < Role.PRIMARY
+    weaker_setting = dict(pavilion, landscape=replace(pavilion["landscape"], area=.35))
+    roles = rank_subjects(weaker_setting, False, captions)
+    assert not all(roles[key] == Role.PRIMARY for key in ("building", "landscape"))

@@ -29,6 +29,33 @@ class FilterSelection:
     raw_only: bool = False
     ai_ids: frozenset[str] = frozenset()
 
+    def to_settings(self) -> dict:
+        return {
+            "rule_ids": sorted(self.rule_ids),
+            "quality_ids": sorted(self.quality_ids),
+            "tag_ids": sorted(self.tag_ids),
+            "ai_ids": sorted(self.selected_ai),
+            "and_mode": self.and_mode,
+            "gps_only": self.gps_only,
+            "quality_ok": self.quality_ok,
+            "raw_only": self.raw_only,
+        }
+
+    @classmethod
+    def from_settings(cls, values: dict) -> "FilterSelection":
+        def ids(name, kind):
+            items = values.get(name)
+            return frozenset(item for item in items if type(item) is kind) if isinstance(items, list) else frozenset()
+
+        return cls(
+            rule_ids=ids("rule_ids", str), quality_ids=ids("quality_ids", str),
+            tag_ids=ids("tag_ids", int), ai_ids=ids("ai_ids", str),
+            and_mode=values.get("and_mode") is not False,
+            gps_only=values.get("gps_only") is True,
+            quality_ok=values.get("quality_ok") is True,
+            raw_only=values.get("raw_only") is True,
+        )
+
     @property
     def selected_ai(self) -> frozenset[str]:
         ids = self.ai_ids

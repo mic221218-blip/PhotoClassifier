@@ -194,6 +194,12 @@ presented and filtered through the same layer.
   **筛选 → 查看范围** includes Quality Issues, Duplicate Groups, Timelapse Stacks and
   Hide Timelapse Stacks. The filter panel combines AI subjects, shooting rules,
   quality flags and custom tags. Run quality analysis from **分析 → 质量分析**;
+- **Projects and resume**: start in the library and pick up your last project, folder or list, filters,
+  and `P` destination after reopening. Use **项目 → 管理** to create a project with existing source folders
+  and move pick lists into it. Choose **全部图库** to see every folder and list. Projects share catalog
+  records, manual tags and analysis results.
+- **Filter presets**: save current conditions under **筛选 → 筛选预设** and apply them to whichever folder
+  or project you are browsing.
 - Check **只看 RAW** at the top of Filters to show only NEF originals.
   It combines with the existing filters. Collapsed timelapse stacks count and
   select only their visible RAW frames.
@@ -217,9 +223,9 @@ presented and filtered through the same layer.
 
 #### Export photos for Lightroom
 
-1. Click **导出结果…** to export matching photos across all pages or **导出清单…** to export an open pick list. Inside an open timelapse stack, the results scope covers the stack. To export only checked photos, click **导出所选照片…** on the selection bar.
+1. Click **导出结果…** to export matching photos across all pages of the current view or **导出清单…** to export an open pick list. The dialog shows the project name when applicable. Inside an open timelapse stack, the results scope covers the stack. To export only checked photos, click **导出所选照片…** on the selection bar.
 2. Choose a destination folder and optionally enter a subfolder name. Keep the original filenames or select **前缀 + 序号** to number files starting at 00001. A NEF and JPEG with the same stem in the same source folder share a number when both are in scope. If a name is taken, you can add a suffix to both names or skip the pair.
-3. Check the destination path, total file count, estimated size and sample filenames, then click the export button showing the file count. The app copies the original NEF, JPEG and PNG files, skips originals already in the destination and remembers the base folder and naming choice.
+3. To bring manual tags into Lightroom Classic, enable **把 NEF 的手动标签导出为 XMP**. Each exported NEF with manual tags gets a matching `.xmp` file alongside its copy. Check the destination, counts and sample names before exporting. Photos are copied as-is, and the app remembers the base folder and naming choice.
 4. To stop, click **取消导出**. The app finishes the current file or pair and keeps completed copies. Use **重试失败项** to retry failed files. Click **打开导出文件夹** to view the copies, then import that folder from Lightroom.
 
 ![Photo export dialog showing the scope, destination, naming options and filename preview](docs/ui-images/ui-export.png)
@@ -231,6 +237,8 @@ presented and filtered through the same layer.
 Use a thumbnail checkbox or enter multi-select mode with **多选**. You can also Ctrl-click to toggle a photo or Shift-click to select a range on the current page. Selections carry across pages, and **全选本页** selects the current page. Click **清除选择** or press Escape to return to browsing. When filters change, matching photos stay selected.
 
 Choose **分析 → 六类题材主次** to analyze people, sky, architecture, city, flowers and natural landscapes together. Whole-frame content, visible area, position and local detail determine each subject's role. A photo can have two main subjects. The original people, sky and combined checks are also available.
+
+The **筛选 → AI 题材** panel shows analysis coverage and can analyze the current folder, including subfolders, or the current project. The full scope is included across pages. Existing results for the current version are reused. Follow progress below the photos while you continue browsing and picking.
 
 Under **筛选 → AI 题材**, select a subject to see main subjects first, followed by secondary and background matches. Ties follow the current sort order. The details pane shows all assigned roles. Multiple filters support AND and OR. Legacy detections follow ranked matches until the six-subject analysis is run for that photo. Results are stored in the local catalog separately from manual tags. Canceling keeps completed results. JPEG, PNG, and NEF files with embedded previews are supported.
 
@@ -466,7 +474,7 @@ PhotoClassifier/
 | Tag storage | User tags stored; system tags (rules/quality) derived live | Threshold changes take effect immediately; V3.5 proposes storing AI predictions separately |
 | Tag structure | Flat `tags` + `photo_tags` | Do "one photo, many tags" properly first; hierarchy/expressions belong to V4 |
 | Tag filtering | Rules + quality + tags share `FilterSelection` | GUI and CLI behave identically; V4 only extends the selection with numeric conditions |
-| Tag persistence | Database only, no EXIF/XMP writes | Original-photo safety; keyword/XMP export belongs to V5 |
+| Tag persistence | Manual tags are stored in the database | Export can write XMP keywords beside NEF copies |
 
 ## Roadmap
 
@@ -479,9 +487,9 @@ PhotoClassifier/
 | V2.5 | Image quality analysis (blur / motion blur / exposure anomalies / black frames / duplicates / timelapse sequences; CLI + GUI, hints only, never auto-delete) | ✅ Done |
 | V3 | Multi-tag system (user tags + rule/quality system tags, unified filtering, batch and undo; CLI + GUI) | ✅ Done (current) |
 | V3.5 | Offline visual recognition | Person and sky filtering available in the desktop preview |
-| V4 | Smart filtering (AND / OR combos of tags + EXIF conditions) | Planned |
-| V5 | Lightroom workflow | Reveal in Explorer, copy paths in bulk, and export selected photos or all filtered results to a folder. XMP keyword export is planned |
-| V6 | GUI (pulled forward: shell implemented — folder library, scan progress, detail panel; Tkinter for now, PySide6 to be evaluated when the environment allows) | 🔨 Shell implemented |
+| V4 | Smart filtering | Saved filter presets are available. Numeric EXIF filters are planned |
+| V5 | Lightroom workflow | Export selected photos, filtered results or pick lists with optional XMP keywords for NEF copies |
+| V6 | Desktop picking workflow | Tkinter supports optional projects, restoring the last workspace and background subject analysis |
 
 The [V3.5 validation and performance report](docs/v3.5-validation.zh-CN.md) records the current desktop behavior and the original experiments.
 
