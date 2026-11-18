@@ -36,7 +36,7 @@ RESULT_COLUMNS = [
     ("camera", "相机", 105, "w"),
     ("iso", "ISO", 45, "e"),
     ("shutter", "快门", 75, "e"),
-    ("rules", "自动标签", 165, "w"),
+    ("rules", "自动标签", 275, "w"),
     ("quality", "质量", 85, "w"),
     ("sharpness", "清晰度", 65, "e"),
     ("size", "大小", 70, "e"),

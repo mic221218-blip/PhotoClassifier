@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("PIL.Image")
+Image = pytest.importorskip("PIL.Image")
 
 from src.exif_reader import iter_tiff_ifds, read_photo_info  # noqa: E402
 from src.preview import (  # noqa: E402
@@ -15,6 +15,7 @@ from src.preview import (  # noqa: E402
     PreviewError,
     ensure_pillow,
     is_supported,
+    load_color_preview,
     load_preview,
 )
 
@@ -58,6 +59,39 @@ def test_embedded_preview_in_subifd(tmp_path: Path) -> None:
     result = load_preview(photo_info(nef, "nef"))
     assert result.source == "embedded_jpeg"
     assert (result.width, result.height) == (640, 480)
+
+
+@pytest.mark.parametrize(
+    ("raw_orientation", "subifd_orientation", "jpeg_orientation", "bright_top"),
+    [
+        (6, None, None, True),
+        (8, None, None, False),
+        (8, 6, None, True),
+        (8, 8, 6, True),
+    ],
+)
+def test_nef_color_preview_uses_most_specific_orientation(
+    tmp_path: Path, raw_orientation, subifd_orientation, jpeg_orientation, bright_top,
+) -> None:
+    stored = Image.new("L", (320, 160), 20)
+    stored.paste(235, (0, 0, 160, 160))
+    jpeg = jpeg_bytes(stored, orientation=jpeg_orientation)
+    nef = write_nef(tmp_path / "shot.NEF", nef_with_preview(
+        jpeg, in_subifd=True, orientation=raw_orientation, subifd_orientation=subifd_orientation,
+    ))
+
+    image = load_color_preview(photo_info(nef, "nef"))
+
+    assert image.size == (160, 320)
+    assert (image.getpixel((80, 80))[0] > 200) is bright_top
+    assert (image.getpixel((80, 240))[0] > 200) is not bright_top
+
+
+def test_nef_color_preview_does_not_rotate_an_already_oriented_jpeg(tmp_path: Path) -> None:
+    jpeg = jpeg_bytes(Image.new("L", (160, 320)), orientation=1)
+    nef = write_nef(tmp_path / "shot.NEF", nef_with_preview(jpeg, orientation=8))
+
+    assert load_color_preview(photo_info(nef, "nef")).size == (160, 320)
 
 
 def test_nef_without_preview_fails_cleanly(tmp_path: Path) -> None:

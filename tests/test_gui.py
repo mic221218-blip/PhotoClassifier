@@ -259,6 +259,51 @@ def test_scene_subjects_rank_before_pagination_and_keep_unranked_detections(root
         app.db.close()
 
 
+def test_list_resize_keeps_filename_compact_and_tags_scrollable(root, db_path):
+    app = seeded_app(root, db_path)
+    try:
+        app.set_result_view("list")
+        root.maxsize(2000, 780)
+        root.geometry("2000x780")
+        root.deiconify()
+        root.update()
+        tree = app.result_tree
+        wide_width = tree.winfo_width()
+        name_width = tree.column("name", "width")
+        tag_width = tree.column("rules", "width")
+        assert name_width <= 240
+        assert tag_width >= 270
+        assert tree.xview() == (0.0, 1.0)
+
+        root.geometry("1200x780")
+        root.update()
+        assert tree.winfo_width() < wide_width
+        assert tree.column("name", "width") == name_width
+        assert tree.column("rules", "width") == tag_width
+        assert tree.xview()[1] < 1.0
+        scrollbars = {
+            str(widget.cget("orient")): widget
+            for widget in app.list_frame.winfo_children()
+            if widget.winfo_class() == "TScrollbar"
+        }
+        assert scrollbars["horizontal"].winfo_ismapped()
+        assert scrollbars["vertical"].winfo_ismapped()
+        tree.xview_moveto(1.0)
+        root.update()
+        x, _, width, _ = tree.bbox(tree.get_children()[0], "rules")
+        assert 0 <= x < x + width <= tree.winfo_width()
+
+        root.geometry("2000x780")
+        root.update()
+        assert tree.xview() == (0.0, 1.0)
+        assert tree.column("name", "width") == name_width
+    finally:
+        root.withdraw()
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
 def test_selection_mode_toggles_rows_and_cancels_across_pages(root, db_path, tmp_path, monkeypatch):
     monkeypatch.setattr(gui, "RESULT_PAGE_SIZE", 2)
     app = PhotoClassifierApp(root, db_path)

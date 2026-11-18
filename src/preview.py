@@ -1,6 +1,4 @@
-"""PhotoClassifier V2.5：质量分析的像素来源。
-
-职责只有一个：**给一张照片拿到可度量的灰度图**。
+"""读取照片的彩色预览和用于质量分析的灰度图。
 
 - NEF：解析 TIFF 结构，取内嵌的 JPEG 预览（IFD0 或 SubIFD 的
   ``JPEGInterchangeFormat`` / ``StripOffsets``），不做 RAW 解码；
@@ -37,6 +35,7 @@ except ImportError:  # pragma: no cover - 环境相关
 #: TIFF 标签
 _TAG_COMPRESSION = 0x0103
 _TAG_STRIP_OFFSETS = 0x0111
+_TAG_ORIENTATION = 0x0112
 _TAG_STRIP_BYTE_COUNTS = 0x0117
 _TAG_JPEG_OFFSET = 0x0201
 _TAG_JPEG_LENGTH = 0x0202
@@ -85,23 +84,27 @@ def is_supported(category: str) -> bool:
 
 
 def load_color_preview(info: PhotoInfo, *, draft_size: tuple[int, int] = (560, 560)):
-    """Read an oriented RGB preview for visual recognition."""
+    """Read an oriented RGB preview for display and visual recognition."""
     ensure_pillow()
     if not is_supported(info.category):
         raise PreviewError("此文件格式不支持图像识别")
 
-    def decode(source):
+    def decode(source, fallback_orientation: int | None = None):
         with Image.open(source) as image:
             if image.width * image.height > _MAX_PIXELS:
                 raise PreviewError("图片尺寸过大")
             image.draft("RGB", draft_size)
+            if fallback_orientation is not None:
+                exif = image.getexif()
+                if exif.get(_TAG_ORIENTATION) not in range(1, 9):
+                    exif[_TAG_ORIENTATION] = fallback_orientation
             return ImageOps.exif_transpose(image).convert("RGB")
 
     if info.category == CATEGORY_NEF:
-        blob, reason = _extract_embedded_preview(info.path)
-        if blob is None:
+        embedded, reason = _extract_embedded_preview(info.path)
+        if embedded is None:
             raise PreviewError(reason or "未找到内嵌预览")
-        return decode(io.BytesIO(blob))
+        return decode(io.BytesIO(embedded.jpeg), embedded.orientation)
     with info.path.open("rb") as source:
         return decode(source)
 
@@ -119,11 +122,11 @@ def load_preview(info: PhotoInfo, config: QualityConfig | None = None) -> Previe
 
     path = Path(info.path)
     if info.category == CATEGORY_NEF:
-        blob, reason = _extract_embedded_preview(path)
-        if blob is None:
+        embedded, reason = _extract_embedded_preview(path)
+        if embedded is None:
             raise PreviewError(reason or "未找到内嵌预览")
         source = PREVIEW_EMBEDDED
-        image, original_size = _decode(blob, cfg, label="内嵌预览")
+        image, original_size = _decode(embedded.jpeg, cfg, label="内嵌预览")
     else:
         source = PREVIEW_FULL
         image, original_size = _decode_file(path, cfg)
@@ -136,8 +139,14 @@ def load_preview(info: PhotoInfo, config: QualityConfig | None = None) -> Previe
 # --------------------------------------------------------------------------- #
 
 
-def _extract_embedded_preview(data_path: Path) -> tuple[bytes | None, str | None]:
-    """从 NEF 里取出最大的内嵌 JPEG 预览，返回 (bytes, 失败原因)。"""
+@dataclass(frozen=True)
+class _EmbeddedPreview:
+    jpeg: bytes
+    orientation: int | None
+
+
+def _extract_embedded_preview(data_path: Path) -> tuple[_EmbeddedPreview | None, str | None]:
+    """从 NEF 里取出最大的内嵌 JPEG 预览及其 TIFF 方向信息。"""
     try:
         with open(data_path, "rb") as handle:
             try:
@@ -161,6 +170,7 @@ class _Candidate:
     length: int = 0
     offsets: tuple[int, ...] = ()
     counts: tuple[int, ...] = ()
+    orientation: int | None = None
 
 
 def _detect_endian(data) -> str:
@@ -174,7 +184,13 @@ def _detect_endian(data) -> str:
 
 def _collect_candidates(data, endian: str) -> list[_Candidate]:
     candidates: list[_Candidate] = []
-    for entries in iter_tiff_ifds(data, include_subifds=True):
+    primary_orientation = None
+    for index, entries in enumerate(iter_tiff_ifds(data, include_subifds=True)):
+        orientation = _read_orientation(entries, endian)
+        if index == 0:
+            primary_orientation = orientation
+        # Nikon previews can omit Orientation in both the JPEG and its SubIFD.
+        orientation = orientation or primary_orientation
         jpeg_offset = entries.get(_TAG_JPEG_OFFSET)
         jpeg_length = entries.get(_TAG_JPEG_LENGTH)
         if jpeg_offset is not None and jpeg_length is not None:
@@ -182,7 +198,7 @@ def _collect_candidates(data, endian: str) -> list[_Candidate]:
                 offset = _unpack_value(_TYPE_LONG, jpeg_offset[2], endian)
                 length = _unpack_value(jpeg_length[0], jpeg_length[2], endian)
                 if offset and length and 0 < length <= _MAX_PREVIEW_BYTES:
-                    candidates.append(_Candidate("jpeg", length, offset, length))
+                    candidates.append(_Candidate("jpeg", length, offset, length, orientation=orientation))
 
         compression = entries.get(_TAG_COMPRESSION)
         strip_offsets = entries.get(_TAG_STRIP_OFFSETS)
@@ -200,12 +216,21 @@ def _collect_candidates(data, endian: str) -> list[_Candidate]:
                                 total,
                                 offsets=tuple(offsets),
                                 counts=tuple(counts),
+                                orientation=orientation,
                             )
                         )
     return candidates
 
 
-def _pick_candidate(candidates: list[_Candidate], data) -> tuple[bytes | None, str | None]:
+def _read_orientation(entries: dict, endian: str) -> int | None:
+    entry = entries.get(_TAG_ORIENTATION)
+    if entry is None or entry[:2] != (_TYPE_SHORT, 1):
+        return None
+    orientation = _unpack_value(_TYPE_SHORT, entry[2], endian)
+    return orientation if orientation in range(1, 9) else None
+
+
+def _pick_candidate(candidates: list[_Candidate], data) -> tuple[_EmbeddedPreview | None, str | None]:
     """挑选体积最大且通过 JPEG 首尾校验的候选。"""
     if not candidates:
         return None, "未找到内嵌 JPEG 预览"
@@ -224,7 +249,7 @@ def _pick_candidate(candidates: list[_Candidate], data) -> tuple[bytes | None, s
             blob = b"".join(pieces)
         trimmed = _trim_jpeg(blob)
         if trimmed is not None:
-            return trimmed, None
+            return _EmbeddedPreview(trimmed, candidate.orientation), None
     return None, "内嵌预览不是有效的 JPEG（文件可能已损坏）"
 
 

@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import io
-import struct
 from pathlib import Path
 
 from PIL import Image, ImageFilter
@@ -22,6 +21,7 @@ from exif_maker import (
     TAG_MAKE,
     TAG_MODEL,
     TYPE_LONG,
+    TYPE_SHORT,
     ascii_value,
     build_tiff,
 )
@@ -31,6 +31,7 @@ TAG_SUB_IFDS = 0x014A
 TAG_JPEG_OFFSET = 0x0201
 TAG_JPEG_LENGTH = 0x0202
 TAG_COMPRESSION = 0x0103
+TAG_ORIENTATION = 0x0112
 TAG_STRIP_OFFSETS = 0x0111
 TAG_STRIP_BYTE_COUNTS = 0x0117
 
@@ -115,9 +116,12 @@ def save_png(path: str | Path, image: Image.Image) -> Path:
     return target
 
 
-def jpeg_bytes(image: Image.Image, *, quality: int = 90) -> bytes:
+def jpeg_bytes(image: Image.Image, *, quality: int = 90, orientation: int | None = None) -> bytes:
     buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=quality)
+    exif = Image.Exif()
+    if orientation is not None:
+        exif[TAG_ORIENTATION] = orientation
+    image.save(buffer, format="JPEG", quality=quality, exif=exif if exif else b"")
     return buffer.getvalue()
 
 
@@ -220,16 +224,14 @@ def _nef_entries(width: int, height: int):
     ]
 
 
-def _subifd_block(jpeg_offset: int, jpeg_length: int) -> bytes:
+def _subifd_block(jpeg_offset: int, jpeg_length: int, orientation: int | None) -> bytes:
     entries = [
-        (TAG_JPEG_OFFSET, TYPE_LONG, jpeg_offset, 1),
-        (TAG_JPEG_LENGTH, TYPE_LONG, jpeg_length, 1),
+        (TAG_JPEG_OFFSET, TYPE_LONG, (jpeg_offset,)),
+        (TAG_JPEG_LENGTH, TYPE_LONG, (jpeg_length,)),
     ]
-    block = struct.pack("<H", len(entries))
-    for tag, typ, value, count in entries:
-        block += struct.pack("<HHI", tag, typ, count) + struct.pack("<I", value)
-    block += struct.pack("<I", 0)
-    return block
+    if orientation is not None:
+        entries.append((TAG_ORIENTATION, TYPE_SHORT, (orientation,)))
+    return build_tiff(entries)[8:]  # All values are inline, so the TIFF header can be dropped.
 
 
 def nef_with_preview(
@@ -238,18 +240,22 @@ def nef_with_preview(
     width: int = 640,
     height: int = 480,
     in_subifd: bool = False,
+    orientation: int | None = None,
+    subifd_orientation: int | None = None,
 ) -> bytes:
     """合成一个 NEF：IFD0（或 SubIFD）里有 JPEG 预览，预览字节接在 TIFF 之后。"""
     entries = _nef_entries(width, height)
+    if orientation is not None:
+        entries.append((TAG_ORIENTATION, TYPE_SHORT, (orientation,)))
 
     if in_subifd:
         probe = build_tiff(entries + [(TAG_SUB_IFDS, TYPE_LONG, (0,))])
         sub_offset = len(probe)
-        block = _subifd_block(0, len(preview))
+        block = _subifd_block(0, len(preview), subifd_orientation)
         jpeg_offset = sub_offset + len(block)
         tiff = build_tiff(entries + [(TAG_SUB_IFDS, TYPE_LONG, (sub_offset,))])
         assert len(tiff) == len(probe)
-        return tiff + _subifd_block(jpeg_offset, len(preview)) + preview
+        return tiff + _subifd_block(jpeg_offset, len(preview), subifd_orientation) + preview
 
     probe = build_tiff(
         entries
