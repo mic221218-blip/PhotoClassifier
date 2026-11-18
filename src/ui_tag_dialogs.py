@@ -141,10 +141,12 @@ class TagDialogsMixin:
             menu.add_command(label="导出所选照片…", command=lambda: self.open_export_dialog(selected_first=True))
         menu.add_separator()
         menu.add_command(
-            label="取消精选" if self._selected_all_picked() else "标记精选",
-            command=self.toggle_picked,
-            state=batch_state,
+            label=f"加入「{self.pick_target.get()}」" if self._active_pick_id is not None else "加入清单",
+            command=self.add_to_pick_list,
+            state="normal" if count and self._active_pick_id is not None else "disabled",
         )
+        if self.opened_pick_list:
+            menu.add_command(label="移出当前清单", command=self.remove_from_pick_list, state=batch_state)
         menu.add_separator()
         menu.add_command(
             label=f"从照片库移除…（{count} 张）",

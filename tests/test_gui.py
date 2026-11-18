@@ -19,7 +19,6 @@ import src.gui as gui
 from src.gui import PhotoClassifierApp
 from src.quality import ANALYZER_VERSION, FLAG_IDS, QualityMeasurement
 from src.scanner import classify_file
-from src.tags import PICK_TAG_NAME
 
 from exif_maker import nikon_z6iii_nef
 from test_database import make_info
@@ -362,8 +361,8 @@ def test_selection_mode_toggles_rows_and_cancels_across_pages(root, db_path, tmp
         assert app._selected_iids == {first}
         click(third, "name")
         app.btn_pick.invoke()
-        picked = app.tag_controller.get_by_name(PICK_TAG_NAME)
-        assert app.tag_controller.tag_counts[picked.id] == 2
+        pick_list, = app.db.list_pick_lists()
+        assert app.db.pick_list_paths(pick_list.id) == {first, third}
         assert app._selected_iids == {first, third}
         app.btn_cancel_selection.invoke()
         assert not app._selecting_results
@@ -576,10 +575,12 @@ def test_gallery_preview_and_selection_follow_the_current_view(root, db_path, tm
         assert not app.selection_actions.winfo_manager()
 
         app.btn_current_pick.invoke()
-        assert app.btn_current_pick["text"] == "取消精选"
-        app.quick_filter_buttons["picked"].invoke()
+        assert app.btn_current_pick["text"] == "已加入目标清单"
+        pick_list, = app.db.list_pick_lists()
+        app.pick_list_tree.selection_set(str(pick_list.id))
+        root.update()
         assert row_names(app) == {infos[0].file_name}
-        app.quick_filter_buttons["all"].invoke()
+        app.btn_leave_pick_list.invoke()
         app.btn_preview.invoke()
         assert app._preview_window.title() == infos[0].file_name
         app._navigate_gallery(0, 1)
@@ -756,8 +757,12 @@ def test_raw_filter_check_and_summary_in_both_views(root, db_path, tmp_path) -> 
         app.rule_vars["slow_shutter"].set(True)
         app._on_filter_changed()
         assert app.result_tree.get_children() == (raw_path,)
-        app.toggle_picked(photos[:2])
-        app.quick_filter_buttons["picked"].invoke()
+        app.add_to_pick_list(photos[:2])
+        pick_list, = app.db.list_pick_lists()
+        app.open_pick_list(pick_list.id)
+        assert row_names(app) == {"photo.NEF", "photo.JPG"}
+        assert not app.active_filter_row.winfo_manager()
+        app.btn_leave_pick_list.invoke()
         assert app.result_tree.get_children() == (raw_path,)
 
         app.btn_clear_active.invoke()
@@ -1654,7 +1659,7 @@ def test_sharpness_sort_requires_quality_data(root, db_path: Path) -> None:
     app.quality_store.close()
 
 
-def test_pick_button_marks_and_unmarks(root, db_path: Path) -> None:
+def test_pick_shortcut_adds_once_and_remove_is_undoable(root, db_path: Path) -> None:
     app = PhotoClassifierApp(root, db_path)
     seed_rule_rows(app)
     assert str(app.btn_pick.cget("state")) == "disabled"
@@ -1663,51 +1668,108 @@ def test_pick_button_marks_and_unmarks(root, db_path: Path) -> None:
     app.result_tree.selection_set(iid)
     app._on_result_select()
     assert str(app.btn_pick.cget("state")) == "normal"
-    assert app.btn_pick.cget("text") == "标记精选"
+    assert app.btn_pick.cget("text") == "加入清单 (P)"
 
     app.btn_pick.invoke()
-    tag = app.tag_store.get_by_name(PICK_TAG_NAME)
-    assert tag is not None
-    assert app.tag_controller.tag_counts[tag.id] == 1
-    assert "★精选" in app.result_tree.item(iid, "values")[6]
-    assert app.btn_pick.cget("text") == "取消精选"
-
-    app.btn_pick.invoke()
-    assert app.tag_controller.tag_counts.get(tag.id, 0) == 0
-    assert "★精选" not in app.result_tree.item(iid, "values")[6]
-    assert app.btn_pick.cget("text") == "标记精选"
-
-    app.btn_pick.invoke()
+    pick_list, = app.db.list_pick_lists()
+    assert app.db.pick_list_paths(pick_list.id) == {iid}
+    assert "★已加入" in app.result_tree.item(iid, "values")[6]
+    assert app.btn_pick.cget("text") == "已加入目标清单"
+    app._on_pick_key()
+    assert app.db.pick_list_paths(pick_list.id) == {iid}
     app.undo_last_tag_operation()
-    assert app.tag_controller.tag_counts.get(tag.id, 0) == 0
+    assert not app.db.pick_list_paths(pick_list.id)
+
+    app._on_pick_key()
+    app.open_pick_list(pick_list.id)
+    app.result_tree.selection_set(iid)
+    app._on_result_select()
+    app.btn_remove_pick.invoke()
+    assert not app.db.pick_list_paths(pick_list.id)
+    assert app.db.get_photo(iid) is not None
+    app.undo_last_tag_operation()
+    assert app.db.pick_list_paths(pick_list.id) == {iid}
     app.db.close()
     app.quality_store.close()
+    app.tag_store.close()
 
 
-def test_pick_button_multi_select_adds_missing_and_removes_all(root, db_path: Path) -> None:
+def test_pick_lists_overlap_and_export_across_folders(root, db_path, tmp_path, monkeypatch) -> None:
+    from src import ui_pick_lists
+
     app = PhotoClassifierApp(root, db_path)
-    seed_rule_rows(app)
-    a = str(Path("D:/Photos/2026/a.NEF").resolve())
-    b = str(Path("D:/Photos/2026/b.NEF").resolve())
-    c = str(Path("D:/Photos/2026/c.NEF").resolve())
+    try:
+        first, second = tmp_path / "first", tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        a = make_info(first / "a.NEF")
+        b = make_info(second / "b.JPG", category="jpeg")
+        c = make_info(first / "c.NEF")
+        a_id, b_id, c_id = (str(info.path) for info in (a, b, c))
+        for info in (a, b, c):
+            info.path.write_bytes(info.file_name.encode())
+        for folder in (first, second):
+            app.db.add_folder(folder)
+        app.db.upsert_many([a, b, c])
+        app.refresh_library()
+        app.refresh_results()
 
-    app.result_tree.selection_set((a, b))
-    app._on_result_select()
-    app.btn_pick.invoke()
-    tag = app.tag_store.get_by_name(PICK_TAG_NAME)
-    assert app.tag_controller.tag_counts[tag.id] == 2
+        original, = app.db.list_pick_lists()
+        app.add_to_pick_list([a])
+        monkeypatch.setattr(ui_pick_lists.simpledialog, "askstring", lambda *_a, **_kw: "客户交付")
+        app.create_pick_list()
+        delivery = app.db.list_pick_lists()[-1]
+        app.browse_folder(str(first))
+        app.result_tree.selection_set((a_id, c_id))
+        app._on_result_select()
+        app.btn_pick.invoke()
+        assert app.db.pick_list_paths(delivery.id) == {a_id, c_id}
+        app.browse_folder(str(second))
+        app.result_tree.selection_set(b_id)
+        app._on_result_select()
+        app._on_pick_key()
+        assert app.db.pick_list_paths(original.id) == {a_id}
 
-    # a 已精选、c 未精选：混合选择应该只补 c，而不是取消 a
-    app.result_tree.selection_set((a, c))
-    app._on_result_select()
-    assert app.btn_pick.cget("text") == "标记精选"
-    app.btn_pick.invoke()
-    assert app.tag_controller.tag_counts[tag.id] == 3
-
-    app.result_tree.selection_set((a, b, c))
-    app._on_result_select()
-    assert app.btn_pick.cget("text") == "取消精选"
-    app.btn_pick.invoke()
-    assert app.tag_controller.tag_counts.get(tag.id, 0) == 0
-    app.db.close()
-    app.quality_store.close()
+        app.pick_target.set(original.name)
+        app._on_pick_target_select()
+        monkeypatch.setattr(gui, "RESULT_PAGE_SIZE", 1)
+        app.raw_only.set(True)
+        app.refresh_results()
+        assert not app.result_tree.get_children()
+        app.open_pick_list(delivery.id)
+        assert app.pick_target.get() == original.name
+        assert app._page_count() == 3
+        assert set(app._result_iids) == {a_id, b_id, c_id}
+        app.btn_export_results.invoke()
+        dialog, = (widget for widget in root.winfo_children() if isinstance(widget, gui.PhotoExportDialog))
+        assert dialog._scope.get() == "results"
+        assert dialog._counts == {"selected": 0, "results": 3}
+        assert any(
+            isinstance(radio, tk.Radiobutton) and radio["text"] == "清单「客户交付」 · 3 个文件"
+            for frame in dialog._form.winfo_children() for radio in frame.winfo_children()
+        )
+        destination = tmp_path / "exports"
+        destination.mkdir()
+        monkeypatch.setattr("src.ui_export.filedialog.askdirectory", lambda **_kw: str(destination))
+        dialog._browse_button.invoke()
+        dialog._naming.set("numbered")
+        dialog._prefix.set("delivery")
+        dialog._action.invoke()
+        deadline = time.monotonic() + 5
+        while dialog._running and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        assert {path.name: path.read_bytes() for path in destination.iterdir()} == {
+            "delivery_00001.NEF": b"a.NEF",
+            "delivery_00002.NEF": b"c.NEF",
+            "delivery_00003.JPG": b"b.JPG",
+        }
+        dialog._close_button.invoke()
+        app.btn_leave_pick_list.invoke()
+        assert app.raw_only.get()
+        assert app._browse_folder == str(second)
+        assert not app.result_tree.get_children()
+    finally:
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()

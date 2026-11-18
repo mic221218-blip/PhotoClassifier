@@ -48,7 +48,7 @@ def _save_settings(path: Path, folder: Path, prefix: str) -> None:
 
 class PhotoExportDialog(tk.Toplevel):
     def __init__(
-        self, app, selected: list[PhotoInfo], results: list[PhotoInfo], *, selected_first: bool,
+        self, app, selected: list[PhotoInfo], results: list[PhotoInfo], *, selected_first: bool, results_label: str | None = None,
     ) -> None:
         super().__init__(app.root)
         self._settings_file = app.db_path.with_name(f"{app.db_path.name}.export.json")
@@ -85,7 +85,7 @@ class PhotoExportDialog(tk.Toplevel):
         self._heading.pack(anchor="w")
         self._form = tk.Frame(body, bg=PANEL_BG)
         self._form.pack(fill="x")
-        self._build_form(app)
+        self._build_form(app, results_label)
         self._detail = self._label(body, app, wraplength=540)
         self._progress = ttk.Progressbar(body)
         self._failures = tk.Frame(body, bg=PANEL_BG)
@@ -119,7 +119,7 @@ class PhotoExportDialog(tk.Toplevel):
     def _label(parent, app, *, size=10, bold=False, **kwargs):
         return tk.Label(parent, bg=PANEL_BG, fg=TEXT, font=app._font(size, bold=bold), justify="left", **kwargs)
 
-    def _build_form(self, app) -> None:
+    def _build_form(self, app, results_label: str | None) -> None:
         form = self._form
         form.columnconfigure(1, weight=1)
 
@@ -148,7 +148,7 @@ class PhotoExportDialog(tk.Toplevel):
             scope, self._scope, "selected", f"已选照片 · {self._counts['selected']:,} 个文件",
             enabled=bool(self._counts["selected"]), stacked=True,
         )
-        view_label = "当前延时叠" if app._opened_timelapse_id is not None else "当前筛选结果（所有页）"
+        view_label = results_label or ("当前延时叠" if app._opened_timelapse_id is not None else "当前筛选结果（所有页）")
         radio(scope, self._scope, "results", f"{view_label} · {self._counts['results']:,} 个文件", stacked=True)
 
         label(1, "保存位置")

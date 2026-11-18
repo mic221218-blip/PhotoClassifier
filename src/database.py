@@ -27,7 +27,7 @@ from typing import Iterable, Iterator
 
 from src.photo_info import EXIF_STATUSES, PhotoInfo
 from src.paths import db_key, resolve_key
-from src.tags import PRESET_TAGS, color_for
+from src.tags import PICK_TAG_NAME, PRESET_TAGS, color_for
 
 
 #: photos 表的全部业务列（不含 path 主键），顺序与 _row_to_photo_info 一致。
@@ -193,10 +193,39 @@ CREATE TABLE IF NOT EXISTS photo_scene_ai (
 );
 """
 
-_SCHEMA = _SCHEMA + QUALITY_SCHEMA + TAGS_SCHEMA + PERSON_SCHEMA + SKY_SCHEMA + SCENE_SCHEMA
+PICK_LIST_SCHEMA = """
+CREATE TABLE IF NOT EXISTS pick_lists (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    name_key    TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS pick_list_photos (
+    list_id     INTEGER NOT NULL,
+    path        TEXT NOT NULL,
+    PRIMARY KEY (list_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pick_list_photos_path ON pick_list_photos (path);
+
+CREATE TRIGGER IF NOT EXISTS remove_pick_list_membership
+AFTER DELETE ON photos
+BEGIN
+    DELETE FROM pick_list_photos WHERE path = OLD.path;
+END;
+"""
+
+_SCHEMA = _SCHEMA + QUALITY_SCHEMA + TAGS_SCHEMA + PERSON_SCHEMA + SKY_SCHEMA + SCENE_SCHEMA + PICK_LIST_SCHEMA
 
 #: 当前 schema 版本（写入 ``PRAGMA user_version``，为后续迁移留钩子）。
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
+
+
+@dataclass(frozen=True)
+class PickList:
+    id: int
+    name: str
+    photo_count: int
 
 #: 按 path 去重的写入语句（列清单固定，编译一次即可）。
 _UPSERT_SQL = """
@@ -344,6 +373,17 @@ class PhotoDatabase:
                         "INSERT OR IGNORE INTO tags (name, color, kind, created_at) "
                         "VALUES (?, ?, 'user', ?)",
                         (name, color_for(name), now),
+                    )
+            if current < 7:
+                legacy = self._conn.execute("SELECT id FROM tags WHERE name = ?", (PICK_TAG_NAME,)).fetchone()
+                name = "原有精选" if legacy is not None else PICK_TAG_NAME
+                self._conn.execute("INSERT OR IGNORE INTO pick_lists (name, name_key) VALUES (?, ?)", (name, name))
+                if legacy is not None:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO pick_list_photos (list_id, path) "
+                        "SELECT pl.id, pt.path FROM photo_tags pt JOIN photos p ON p.path = pt.path "
+                        "JOIN pick_lists pl ON pl.name_key = ? WHERE pt.tag_id = ?",
+                        (name, legacy["id"]),
                     )
             if current < SCHEMA_VERSION:
                 # 只做加法（新表 / 新索引），不重建、不动 photos 数据
@@ -493,6 +533,69 @@ class PhotoDatabase:
                 removed += int(cursor.rowcount or 0)
         return removed
 
+    def list_pick_lists(self) -> list[PickList]:
+        rows = self._conn.execute("""
+            SELECT pl.id, pl.name, COUNT(m.path) AS photo_count
+            FROM pick_lists pl LEFT JOIN pick_list_photos m ON m.list_id = pl.id
+            GROUP BY pl.id ORDER BY pl.id
+        """)
+        return [PickList(row["id"], row["name"], row["photo_count"]) for row in rows]
+
+    def create_pick_list(self, name: str) -> int:
+        name = _pick_list_name(name)
+        try:
+            with self._conn:
+                cursor = self._conn.execute(
+                    "INSERT INTO pick_lists (name, name_key) VALUES (?, ?)", (name, name.casefold()),
+                )
+                return int(cursor.lastrowid)
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"清单「{name}」已存在") from exc
+
+    def rename_pick_list(self, list_id: int, name: str) -> None:
+        name = _pick_list_name(name)
+        try:
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE pick_lists SET name = ?, name_key = ? WHERE id = ?", (name, name.casefold(), list_id),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"清单「{name}」已存在") from exc
+
+    def delete_pick_list(self, list_id: int) -> None:
+        with self._conn:
+            self._conn.execute("DELETE FROM pick_list_photos WHERE list_id = ?", (list_id,))
+            self._conn.execute("DELETE FROM pick_lists WHERE id = ?", (list_id,))
+
+    def pick_list_paths(self, list_id: int | None) -> set[str]:
+        if list_id is None:
+            return set()
+        rows = self._conn.execute("SELECT path FROM pick_list_photos WHERE list_id = ?", (list_id,))
+        return {row["path"] for row in rows}
+
+    def photos_in_pick_list(self, list_id: int) -> list[PhotoInfo]:
+        rows = self._conn.execute("""
+            SELECT p.* FROM pick_list_photos m JOIN photos p ON p.path = m.path
+            WHERE m.list_id = ? ORDER BY p.path
+        """, (list_id,))
+        return [_row_to_photo_info(row) for row in rows]
+
+    def change_pick_list(self, list_id: int, paths: Iterable[str | Path], *, add: bool) -> list[str]:
+        """更新指定清单，返回实际变更的路径，供单步撤销使用。"""
+        if add:
+            sql = """
+                INSERT OR IGNORE INTO pick_list_photos (list_id, path)
+                SELECT pl.id, p.path FROM pick_lists pl, photos p WHERE pl.id = ? AND p.path = ?
+            """
+        else:
+            sql = "DELETE FROM pick_list_photos WHERE list_id = ? AND path = ?"
+        changed = []
+        with self._conn:
+            for path in dict.fromkeys(db_key(path) for path in paths):
+                if self._conn.execute(sql, (list_id, path)).rowcount:
+                    changed.append(path)
+        return changed
+
     def person_results(self, version: str) -> dict[str, bool]:
         return self._ai_results("photo_person_ai", version)
 
@@ -637,6 +740,13 @@ class PhotoDatabase:
 # --------------------------------------------------------------------------- #
 # 内部工具
 # --------------------------------------------------------------------------- #
+
+
+def _pick_list_name(name: str) -> str:
+    name = name.strip()
+    if not name or len(name) > 30 or not name.isprintable():
+        raise ValueError("请输入 1–30 个字符的清单名称")
+    return name
 
 
 def _escape_like(text: str) -> str:

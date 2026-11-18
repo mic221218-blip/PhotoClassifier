@@ -190,7 +190,7 @@ presented and filtered through the same layer.
   and **视图 → 折叠延时叠** to toggle folding;
 - **Detail panel**: click **照片详情** below the photos for the preview and tags.
   Expand Shooting Parameters and Analysis for EXIF, quality measurements and matching rules;
-- **Filters and quality analysis**: the sidebar has All and Picks views.
+- **Filters and quality analysis**: use All Results in the sidebar to reset the browse scope.
   **筛选 → 查看范围** includes Quality Issues, Duplicate Groups, Timelapse Stacks and
   Hide Timelapse Stacks. The filter panel combines AI subjects, shooting rules,
   quality flags and custom tags. Run quality analysis from **分析 → 质量分析**;
@@ -201,9 +201,12 @@ presented and filtered through the same layer.
   by `blur_score` high to low; a numeric "Sharpness" column; unanalyzed / video /
   failed photos go last; the sort applies to the current view and is not persisted
   after closing the app;
-- **Quick pick (P2)**: select photos and click "Pick" or press `P`; when all
-  selected photos are already picked the button turns into "Unpick"; it reuses
-  the "精选" tag, so the Picks filter shows them and `Ctrl+Z` undoes;
+- **Pick lists**: create named lists under **选片清单**. Choose a destination
+  with **加入到**, then press `P` or click **加入清单** to add the selected photos.
+  Photos can belong to multiple lists. Open a list to see all its photos across
+  folders and export them with **导出清单**. Return to browsing to resume the previous
+  filters. Use **移出当前清单** to remove photos from the open list and `Ctrl+Z`
+  to undo the last membership change. Existing Picks are copied into **原有精选** on upgrade;
 - **My tags (V3)**: searchable checkbox list with photo counts under Filters
   and chip editing in the detail panel. The **照片操作** and right-click menus
   include batch add/remove with single-step undo. Open the tag manager from **管理照片库**;
@@ -214,7 +217,7 @@ presented and filtered through the same layer.
 
 #### Export photos for Lightroom
 
-1. Click **导出结果…** above the results to export matching photos across all pages. Inside an open timelapse stack, this scope covers the stack. To export only checked photos, click **导出所选照片…** on the selection bar.
+1. Click **导出结果…** to export matching photos across all pages or **导出清单…** to export an open pick list. Inside an open timelapse stack, the results scope covers the stack. To export only checked photos, click **导出所选照片…** on the selection bar.
 2. Choose a destination folder and optionally enter a subfolder name. Keep the original filenames or select **前缀 + 序号** to number files starting at 00001. A NEF and JPEG with the same stem in the same source folder share a number when both are in scope. If a name is taken, you can add a suffix to both names or skip the pair.
 3. Check the destination path, total file count, estimated size and sample filenames, then click the export button showing the file count. The app copies the original NEF, JPEG and PNG files, skips originals already in the destination and remembers the base folder and naming choice.
 4. To stop, click **取消导出**. The app finishes the current file or pair and keeps completed copies. Use **重试失败项** to retry failed files. Click **打开导出文件夹** to view the copies, then import that folder from Lightroom.

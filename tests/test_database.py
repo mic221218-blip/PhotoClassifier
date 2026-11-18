@@ -15,6 +15,7 @@ from src.quality import ANALYZER_VERSION, QualityMeasurement
 from src.quality_store import QualityStore
 from src.tag_store import TagStore
 from src.scanner import CATEGORY_JPEG, CATEGORY_NEF, CATEGORY_VIDEO
+from src.tags import PICK_TAG_NAME
 
 
 def make_info(path: Path, **overrides) -> PhotoInfo:
@@ -66,6 +67,39 @@ def test_upsert_and_count(db_path: Path) -> None:
         )
 
         assert db.count_photos() == 3
+
+
+def test_migrate_legacy_picks_once_and_keep_list_membership_independent(db_path: Path, tmp_path: Path) -> None:
+    photo = make_info(tmp_path / "existing.NEF")
+    other = make_info(tmp_path / "other.NEF")
+    with PhotoDatabase.open(db_path) as db:
+        db.upsert_many([photo, other])
+        db._conn.executescript("""
+            DROP TRIGGER remove_pick_list_membership;
+            DROP TABLE pick_list_photos;
+            DROP TABLE pick_lists;
+            PRAGMA user_version = 6;
+        """)
+    with TagStore.open(db_path) as tags:
+        legacy = tags.create_tag(PICK_TAG_NAME)
+        tags.add_tags([photo.path], [legacy.id])
+
+    with PhotoDatabase.open(db_path) as db:
+        original, = db.list_pick_lists()
+        assert original.name == "原有精选"
+        assert db.pick_list_paths(original.id) == {str(photo.path)}
+        delivery = db.create_pick_list("Delivery")
+        with pytest.raises(ValueError, match="已存在"):
+            db.rename_pick_list(original.id, "delivery")
+        db.change_pick_list(delivery, [photo.path, other.path], add=True)
+        db.change_pick_list(original.id, [photo.path], add=False)
+
+    with PhotoDatabase.open(db_path) as db:
+        assert not db.photos_in_pick_list(original.id)
+        assert {info.path for info in db.photos_in_pick_list(delivery)} == {photo.path, other.path}
+        db.delete_pick_list(original.id)
+        assert db.remove_photos([photo.path]) == 1
+        assert db.pick_list_paths(delivery) == {str(other.path)}
 
 
 def test_roundtrip_all_fields(db_path: Path) -> None:

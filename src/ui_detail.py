@@ -75,7 +75,7 @@ class DetailMixin:
             self.btn_open.config(state="disabled", command=None)
             self.btn_reveal.config(state="disabled", command=None)
             self.btn_copy.config(state="disabled", command=None)
-            self.btn_current_pick.config(text="标记精选", state="disabled", fg=TEXT_FAINT)
+            self._update_detail_pick_button()
             if stack is not None:
                 first = stack.frames[0].taken_at
                 last = stack.frames[-1].taken_at
@@ -106,10 +106,7 @@ class DetailMixin:
         )
         summary = "\n".join(value for value in (info.camera, settings) if value)
         self.detail_meta.config(text=summary)
-        picked = self._selected_all_picked([info])
-        self.btn_current_pick.config(
-            text="取消精选" if picked else "标记精选", state="normal", fg=GREEN if picked else TEXT,
-        )
+        self._update_detail_pick_button()
 
         for child in self.detail_rows.winfo_children():
             child.destroy()
@@ -383,6 +380,7 @@ class DetailMixin:
             self._after_tag_change(f"已移除标签「{name}」")
 
     def _after_tag_change(self, message: str) -> None:
+        self._pick_undo = None
         self.tag_controller.mark_dirty()
         self.refresh_tags()
         self.refresh_results()

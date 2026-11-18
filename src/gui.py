@@ -40,7 +40,7 @@ from src.ui_gallery import GalleryPhoto
 from src.ui_panels import PanelsMixin
 from src.ui_tag_dialogs import TagDialogsMixin
 from src.ui_thumbnail import PreviewCanvas, ThumbnailMixin
-from src.tags import PICK_TAG_NAME
+from src.ui_pick_lists import PickListsMixin
 from src.scan_catalog import scan_catalog
 from src.shell import open_in_explorer, open_with_default_app
 
@@ -68,7 +68,7 @@ from src.ui_theme import (  # noqa: E402  (主题常量集中管理)
 RESULT_PAGE_SIZE = 250
 
 
-class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMixin, ThumbnailMixin):
+class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMixin, ThumbnailMixin, PickListsMixin):
     """主窗口应用。``root`` 由调用方创建，方便测试与自检。"""
 
     def __init__(self, root: tk.Tk, db_path: str | Path = DEFAULT_DB):
@@ -95,6 +95,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._matched_iids: list[str] = []
         self._result_iids: list[str] = []
         self._catalog_timelapses: tuple[TimelapseStack, ...] = ()
+        self._timelapses_pick_view = False
         self._timelapses_raw_only = False
         self._timelapses: dict[str, TimelapseStack] = {}
         self._timelapse_paths: dict[str, tuple[str, ...]] = {}
@@ -116,6 +117,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self.analyze_queue: queue.Queue = queue.Queue()
         self.analyze_report = None
         self._init_ai_analysis()
+        self._init_pick_lists()
 
         self.rule_engine = RuleEngine()
         self.quality_engine = QualityEngine()
@@ -280,7 +282,11 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
                     results.append(info)
         if results:
             selected = [info for info in results if str(info.path) in self._selected_iids]
-            PhotoExportDialog(self, selected, results, selected_first=selected_first and bool(selected))
+            pick_list = self.opened_pick_list
+            PhotoExportDialog(
+                self, selected, results, selected_first=selected_first and bool(selected),
+                results_label=f"清单「{pick_list.name}」" if pick_list else None,
+            )
 
     def _update_export_button(self) -> None:
         enabled = self.result_frame.winfo_manager() and any(
@@ -377,7 +383,10 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self.gallery.show_selection(self._focus_iid, set(selected_rows), partial_rows)
 
     def _on_delete_key(self, _event=None) -> str:
-        self.remove_selected_photos()
+        if self.opened_pick_list:
+            self.remove_from_pick_list()
+        else:
+            self.remove_selected_photos()
         return "break"
 
     def remove_selected_photos(self) -> None:
@@ -412,6 +421,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self.status_left.config(text=f"已从照片库移除 {removed} 张（磁盘文件保留）")
 
     def undo_last_tag_operation(self) -> None:
+        if self._undo_pick_change():
+            return
         message = self.tag_controller.undo_last()
         if message is None:
             return
@@ -490,16 +501,19 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self.browse_folder(selected[0])
 
     def _sync_library_selection(self) -> None:
-        selection = (self._browse_folder,) if self._browse_folder is not None else ()
+        folder = self._browse_folder if self._opened_pick_id is None else None
+        selection = (folder,) if folder is not None else ()
         if self.library_tree.selection() != selection:
             self.library_tree.selection_set(selection)
-        self.library_tree.focus(self._browse_folder or "")
-        self.btn_library_all.config(bg=INPUT_BG if self._browse_folder else ACCENT_DIM)
+        self.library_tree.focus(folder or "")
+        self.btn_library_all.config(bg=ACCENT_DIM if folder is None and self._opened_pick_id is None else INPUT_BG)
         self.library_menu.entryconfigure(
-            "从库中移除当前文件夹…", state="normal" if self._browse_folder else "disabled",
+            "从库中移除当前文件夹…", state="normal" if folder else "disabled",
         )
 
     def browse_folder(self, folder: str | None) -> None:
+        if self._opened_pick_id is not None:
+            self.leave_pick_list(restore_position=folder == self._browse_folder)
         if folder == self._browse_folder:
             return
         self._browse_folder = folder
@@ -622,15 +636,26 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
     # ------------------------------------------------------------------ #
 
     def refresh_results(self, *, skip_duplicate_rebuild: bool = False) -> None:
-        folders = [self._browse_folder] if self._browse_folder else [f.path for f in self.db.list_folders()]
-        photos = self.db.find_photos_under(folders)
+        self.refresh_pick_lists()
+        pick_list = self.opened_pick_list
+        if self._opened_pick_id is not None and pick_list is None:
+            self.leave_pick_list()
+            return
+        if pick_list:
+            photos = self.db.photos_in_pick_list(pick_list.id)
+        else:
+            folders = [self._browse_folder] if self._browse_folder else [f.path for f in self.db.list_folders()]
+            photos = self.db.find_photos_under(folders)
         previous_infos = self.infos_by_iid
         previous_rules = self._rule_cache
         self.infos_by_iid = {str(info.path): info for info in photos}
-        selected_filters = self._filter_selection()
+        selected_filters = FilterSelection() if pick_list else self._filter_selection()
+        quick_filter = "all" if pick_list else self._quick_filter
         catalog_changed = previous_infos != self.infos_by_iid
-        if catalog_changed:
-            self._catalog_timelapses = detect_timelapse(photos)
+        if catalog_changed or self._timelapses_pick_view != bool(pick_list):
+            self._catalog_timelapses = () if pick_list else detect_timelapse(photos)
+            self._timelapses_pick_view = bool(pick_list)
+            catalog_changed = True
         if catalog_changed or self._timelapses_raw_only != selected_filters.raw_only:
             self._timelapses_raw_only = selected_filters.raw_only
             stacks = self._catalog_timelapses
@@ -660,13 +685,12 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
                 )
             )
 
-        picked = self.tag_controller.get_by_name(PICK_TAG_NAME)
         self._matched_iids = []
         for info in photos:
             iid = str(info.path)
-            if self._quick_filter == "timelapse" and iid not in self._timelapse_by_path:
+            if quick_filter == "timelapse" and iid not in self._timelapse_by_path:
                 continue
-            if self._quick_filter == "cull" and iid in self._timelapse_by_path:
+            if quick_filter == "cull" and iid in self._timelapse_by_path:
                 continue
             matches = previous_rules.get(iid) if previous_infos.get(iid) == info else None
             if matches is None:
@@ -674,7 +698,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self._rule_cache[iid] = matches
             quality_flags = self._quality_flags_for(info)
             user_tags = self.tag_controller.tags_by_path.get(iid, [])
-            if not self._passes_quick_filter(quality_flags, user_tags, picked):
+            if not self._passes_quick_filter(quick_filter, quality_flags):
                 continue
             if not self._passes_filter(info, matches, quality_flags, user_tags, selected_filters):
                 continue
@@ -684,7 +708,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         selected_ai = selected_filters.selected_ai
         if selected_ai:
             self._matched_iids.sort(key=lambda iid: self._ai_sort_key(iid, selected_ai), reverse=True)
-        if self._quick_filter == "duplicates":
+        if quick_filter == "duplicates":
             self._matched_iids.sort(key=lambda iid: self.duplicates.by_path[iid].group_id)
         self._refresh_result_rows()
         self._result_page = min(self._result_page, self._page_count() - 1)
@@ -719,18 +743,16 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if self._selection_anchor not in self._result_iids:
             self._selection_anchor = ""
 
-    def _passes_quick_filter(
-        self, flags: list[QualityFlag], tags: list[Tag], picked: Tag | None,
-    ) -> bool:
-        if self._quick_filter == "picked":
-            return picked is not None and any(tag.id == picked.id for tag in tags)
-        if self._quick_filter == "issues":
+    def _passes_quick_filter(self, quick_filter: str, flags: list[QualityFlag]) -> bool:
+        if quick_filter == "issues":
             return any(flag.flag_id != "duplicate" for flag in flags)
-        if self._quick_filter == "duplicates":
+        if quick_filter == "duplicates":
             return any(flag.flag_id == "duplicate" for flag in flags)
         return True
 
     def set_quick_filter(self, key: str) -> None:
+        if self._opened_pick_id is not None:
+            self.leave_pick_list(restore_position=key == self._quick_filter)
         if key != self._quick_filter:
             self._quick_filter = key
             self._opened_timelapse_id = None
@@ -800,7 +822,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self.result_tree.delete(*removed)
         existing = set(previous).difference(removed)
         gallery_photos = []
-        picked_tag = self.tag_controller.get_by_name(PICK_TAG_NAME)
+        pick_list = self.opened_pick_list
         for iid in page:
             stack = self._timelapses.get(iid)
             if stack is not None:
@@ -828,20 +850,20 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
                 ai_tags = [SUBJECTS[key] for key, value in roles.items() if value == top_role]
                 ai_text = f"{ROLE_NAMES.get(top_role, 'AI')} · " + " · ".join(ai_tags)
                 labels = f"{labels} ｜ {ai_text}" if labels else ai_text
+            if iid in self._active_pick_paths:
+                labels = f"★已加入 ｜ {labels}" if labels else "★已加入"
             measurement = self.measurements_by_path.get(str(info.path))
             quality_text = " · ".join(
                 _QUALITY_SHORT.get(flag.flag_id, flag.label) for flag in quality_flags
             )
             status = quality_text.split(" · ", 1)[0]
-            if self._quick_filter == "duplicates":
+            if not pick_list and self._quick_filter == "duplicates":
                 status = f"重复组 {self.duplicates.by_path[iid].group_id}"
             if info.exif_status == EXIF_ERROR:
                 status = status or "读取失败"
             if not status and top_role == Role.PRIMARY:
                 status = "、".join(ai_tags)
-            gallery_photos.append(GalleryPhoto(
-                info, picked_tag is not None and any(tag.id == picked_tag.id for tag in user_tags), status,
-            ))
+            gallery_photos.append(GalleryPhoto(info, iid in self._active_pick_paths, status))
             if not quality_text:
                 if measurement is None:
                     quality_text = ""
@@ -871,7 +893,9 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self._render_result_row(iid, values, tags, existing)
         if tuple(page) != self.result_tree.get_children():
             self.result_tree.set_children("", *page)
-        if not self._folder_paths:
+        if pick_list:
+            empty = "这份清单还没有照片。返回浏览，选择加入目标后按 P。"
+        elif not self._folder_paths:
             empty = "添加文件夹，开始整理照片"
         elif self._quick_filter in ("issues", "duplicates") and not self.measurements_by_path:
             empty = "从「分析 → 质量分析」分析照片后，可以在这里复核结果。"
@@ -916,6 +940,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._update_export_button()
         title = self._folder_label(Path(self._browse_folder)) if self._browse_folder else "全部照片"
         stack = self._timelapses.get(self._opened_timelapse_id)
+        pick_list = self.opened_pick_list
         if stack is not None:
             title = f"延时 · {stack.frame_count:,} 帧"
             count = f"{len(self._result_iids):,} 张"
@@ -927,65 +952,24 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
                 count += f" · {folded:,} 叠"
             self.btn_leave_timelapse.pack_forget()
         self.fold_choice.set(self._fold_timelapses)
-        self.view_menu.entryconfigure("折叠延时叠", state="disabled" if stack is not None else "normal")
-        scope = self.quick_filter_buttons[self._quick_filter]["text"] if self._quick_filter != "all" and stack is None else ""
+        self.view_menu.entryconfigure("折叠延时叠", state="disabled" if stack is not None or pick_list else "normal")
+        self.btn_filters.config(state="disabled" if pick_list else "normal")
+        self.btn_export_results.config(text="导出清单…" if pick_list else "导出结果…")
+        if pick_list:
+            title = pick_list.name
+            self.btn_leave_pick_list.pack(side="left", before=self.gallery_title, padx=(0, 8))
+        else:
+            self.btn_leave_pick_list.pack_forget()
+        scope = ""
+        if self._quick_filter != "all" and stack is None and not pick_list:
+            scope = self.quick_filter_buttons[self._quick_filter]["text"]
         title = title if len(title) <= 22 else title[:21] + "…"
         self.gallery_title.config(text=f"{title} · {scope}" if scope else title)
         self.count_label.config(text=count)
         self._update_shortcut_hint()
         for key, button in self.quick_filter_buttons.items():
-            button.config(bg=ACCENT_DIM if key == self._quick_filter else INPUT_BG)
+            button.config(bg=ACCENT_DIM if not pick_list and key == self._quick_filter else INPUT_BG)
         self._show_active_filters()
-
-    def _selected_all_picked(self, infos: list[PhotoInfo] | None = None) -> bool:
-        infos = infos if infos is not None else self._selected_infos()
-        if not infos:
-            return False
-        tag = self.tag_controller.get_by_name(PICK_TAG_NAME)
-        if tag is None:
-            return False
-        return all(
-            tag.id in self.tag_controller.tag_ids_by_path.get(str(info.path), set())
-            for info in infos
-        )
-
-    def _update_pick_button(self) -> None:
-        button = getattr(self, "btn_pick", None)
-        if button is None:
-            return
-        infos = self._selected_infos()
-        if not infos:
-            button.config(text="标记精选", state="disabled", fg=TEXT_FAINT)
-            return
-        if self._selected_all_picked(infos):
-            button.config(text="取消精选", state="normal", fg=GREEN)
-        else:
-            button.config(text="标记精选", state="normal", fg=TEXT)
-
-    def _on_pick_key(self, _event=None) -> str:
-        self.toggle_picked()
-        return "break"
-
-    def toggle_picked(self, infos: list[PhotoInfo] | None = None) -> None:
-        """把选中照片标记为“精选”；全部已精选时则取消。"""
-        infos = self._selected_infos() if infos is None else infos
-        if not infos:
-            return
-        tag = self.tag_controller.get_by_name(PICK_TAG_NAME)
-        if tag is not None and self._selected_all_picked(infos):
-            removed = self.tag_controller.apply_remove(
-                [str(info.path) for info in infos], [tag.id]
-            )
-            message = f"已取消 {len(infos)} 张照片的精选（{len(removed)} 条）"
-        else:
-            tag = self.tag_controller.ensure_tag(PICK_TAG_NAME)
-            added, unknown = self.tag_controller.apply_add(
-                [str(info.path) for info in infos], [tag.id]
-            )
-            message = f"已标记 {len(infos)} 张照片为精选（新增 {len(added)} 条）"
-            if unknown:
-                message += f"，跳过 {len(unknown)} 个未知路径"
-        self._after_tag_change(message)
 
     def toggle_quality_sort(self) -> None:
         """在“默认顺序”和“清晰度优先”之间切换。"""
@@ -1053,7 +1037,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         if skip_duplicates:
             self.duplicates = DuplicateResult()
         else:
-            if self._browse_folder:
+            if self._browse_folder or self.opened_pick_list:
                 photos = self.db.find_photos_under(f.path for f in self.db.list_folders())
             self.duplicates = rebuild_duplicates(self.quality_store, photos)
         self._quality_cache_revision = self._quality_revision
@@ -1126,6 +1110,9 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
             self.btn_filters.config(text="收起筛选", bg=ACCENT_DIM)
 
     def _show_active_filters(self) -> None:
+        if self.opened_pick_list:
+            self.active_filter_row.pack_forget()
+            return
         raw_only = self.raw_only.get()
         self.raw_filter_check.config(
             bg=ACCENT_DIM if raw_only else ACCENT_SOFT,
@@ -1214,7 +1201,7 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
     def _update_shortcut_hint(self) -> None:
         hint = ""
         if self._result_view == "grid" and self._result_iids:
-            hint = "空格  大图    P  精选" if PILLOW_AVAILABLE else "安装 Pillow 后可查看缩略图"
+            hint = "空格  大图    P  加入清单" if PILLOW_AVAILABLE else "安装 Pillow 后可查看缩略图"
         self.status_shortcuts.config(text=hint)
 
     def _focus_result_widget(self) -> None:
@@ -1319,11 +1306,17 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         self._button(controls, "上一张", lambda: self._navigate_gallery(0, -1)).pack(side="left", padx=(0, 4))
         self._button(controls, "下一张", lambda: self._navigate_gallery(0, 1)).pack(side="left")
         self._button(controls, "关闭", viewer.destroy).pack(side="right")
+        tk.Label(controls, textvariable=self.pick_target, bg=WIN_BG, fg=TEXT_SUB, font=self._font(9)).pack(
+            side="right", padx=8,
+        )
+        self._button(
+            controls, "加入清单 (P)", lambda: self.add_to_pick_list([self.current] if self.current else []),
+        ).pack(side="right")
         preview.pack(fill="both", expand=True, padx=10)
         viewer.bind("<Left>", lambda _event: self._navigate_gallery(0, -1))
         viewer.bind("<Right>", lambda _event: self._navigate_gallery(0, 1))
-        viewer.bind("<p>", lambda _event: self.toggle_picked([self.current] if self.current else []))
-        viewer.bind("<P>", lambda _event: self.toggle_picked([self.current] if self.current else []))
+        viewer.bind("<p>", lambda _event: self.add_to_pick_list([self.current] if self.current else []))
+        viewer.bind("<P>", lambda _event: self.add_to_pick_list([self.current] if self.current else []))
         viewer.bind("<Escape>", lambda _event: viewer.destroy())
         viewer.bind("<space>", lambda _event: viewer.destroy())
         viewer.bind("<Destroy>", self._on_preview_destroy)

@@ -115,8 +115,10 @@ class PanelsMixin:
         section = tk.Frame(panel, bg=PANEL_BG)
         section.pack(fill="x", padx=12, pady=(14, 4))
         tk.Label(section, text="浏览结果", bg=PANEL_BG, fg=TEXT_SUB, font=self._font(9, bold=True)).pack(anchor="w")
-        self.quick_filter_buttons = {}
-        self._build_quick_filters(section, (("all", "全部"), ("picked", "精选")))
+        all_results = self._button(section, "全部结果", lambda: self.set_quick_filter("all"))
+        all_results.pack(fill="x", pady=(3, 0))
+        self.quick_filter_buttons = {"all": all_results}
+        self._build_pick_lists(panel)
         self._build_filters(panel)
 
     def _build_quick_filters(self, parent, options) -> None:
@@ -310,6 +312,7 @@ class PanelsMixin:
         header = tk.Frame(center, bg=WIN_BG)
         header.pack(fill="x", padx=14, pady=(12, 8))
         self.btn_leave_timelapse = self._button(header, "返回浏览", self.leave_timelapse)
+        self.btn_leave_pick_list = self._button(header, "返回浏览", self.leave_pick_list)
         self.gallery_title = tk.Label(header, bg=WIN_BG, fg=TEXT, font=self._font(16, bold=True))
         self.gallery_title.pack(side="left")
         self.count_label = tk.Label(header, text="", bg=WIN_BG, fg=TEXT_SUB, font=self._font(9))
@@ -343,6 +346,7 @@ class PanelsMixin:
         self.page_status = tk.Label(pages, bg=WIN_BG, fg=TEXT_SUB, font=self._font(9))
         self.page_status.pack(side="left")
         self._build_selection_bar()
+        self._build_pick_actions(self.result_frame)
 
         viewport = tk.Frame(self.result_frame, bg=WIN_BG)
         viewport.pack(fill="both", expand=True)
@@ -456,8 +460,6 @@ class PanelsMixin:
         self.selection_count.pack(side="left", padx=(12, 10))
         self.btn_batch_tag = self._button(self.selection_actions, "添加标签", self.batch_add_tags, disabled=True)
         self.btn_batch_tag.pack(side="left", padx=(0, 4), pady=5)
-        self.btn_pick = self._button(self.selection_actions, "标记精选", self.toggle_picked, disabled=True)
-        self.btn_pick.pack(side="left", padx=(0, 4), pady=5)
         self.btn_export = self._button(
             self.selection_actions, "导出所选照片…", lambda: self.open_export_dialog(selected_first=True),
         )
@@ -575,7 +577,7 @@ class PanelsMixin:
         self.tag_suggestions.bind("<ButtonRelease-1>", self._on_tag_suggestion_clicked)
 
         self.btn_current_pick = self._button(
-            content, "标记精选", lambda: self.toggle_picked([self.current] if self.current else []),
+            content, "加入目标清单", lambda: self.add_to_pick_list([self.current] if self.current else []),
             disabled=True,
         )
         self.btn_current_pick.pack(anchor="w", padx=18, pady=(10, 6))
