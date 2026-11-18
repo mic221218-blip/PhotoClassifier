@@ -33,11 +33,10 @@ To uninstall, use **Settings → Apps** in Windows.
 
 - PhotoClassifier is **not a Lightroom replacement** — it is the photo analysis
   and filtering tool that runs **before** Lightroom;
-- It **never moves, copies, or modifies original photos** — classification is
-  "virtual", stored in a database; the RAW files on disk always stay exactly
-  where they are;
+- Classification is stored in a database. Originals stay in place, and
+  confirming an export copies the selected photos to a chosen folder;
 - Core workflow: `camera → photo folder → PhotoClassifier (scan + analyze +
-  filter) → Lightroom (post-processing)`.
+  filter + export) → Lightroom (post-processing)`.
 
 ## Core Design Principles
 
@@ -198,6 +197,10 @@ presented and filtered through the same layer.
 - Check **只看 RAW** at the top of Filters to show only NEF originals.
   It combines with the existing filters. Collapsed timelapse stacks count and
   select only their visible RAW frames.
+- **Export selected photos**. Select NEF, JPEG, or PNG files and click
+  **导出所选照片…** in the selection bar. Choose a folder and confirm to copy
+  the originals. New copies get a numbered name if needed, and originals already
+  in the destination are skipped. Open the export folder to import it into Lightroom.
 - **Sharpness sort (P1)**: a "Sharpness first" button in the result header sorts
   by `blur_score` high to low; a numeric "Sharpness" column; unanalyzed / video /
   failed photos go last; the sort applies to the current view and is not persisted
@@ -467,7 +470,7 @@ PhotoClassifier/
 | V3 | Multi-tag system (user tags + rule/quality system tags, unified filtering, batch and undo; CLI + GUI) | ✅ Done (current) |
 | V3.5 | Offline visual recognition | Person and sky filtering available in the desktop preview |
 | V4 | Smart filtering (AND / OR combos of tags + EXIF conditions) | Planned |
-| V5 | Lightroom workflow (reveal in Explorer / batch paths / export to folder) | Planned |
+| V5 | Lightroom workflow | Reveal in Explorer, copy paths in bulk, and export selected photos to a folder |
 | V6 | GUI (pulled forward: shell implemented — folder library, scan progress, detail panel; Tkinter for now, PySide6 to be evaluated when the environment allows) | 🔨 Shell implemented |
 
 The [V3.5 validation and performance report](docs/v3.5-validation.zh-CN.md) records the current desktop behavior and the original experiments.
@@ -513,8 +516,7 @@ The entire project must obey:
 - Never delete originals by default;
 - Never modify RAW files by default;
 - Never move originals by default;
-- Any operation that moves or copies files (V5 export) requires explicit user
-  confirmation;
+- Moving or copying files requires explicit user confirmation, including photo export;
 - "Remove from library" deletes database records only (photo, quality and tag
   links); **files on disk are never deleted**, and a rescan brings them back.
 

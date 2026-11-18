@@ -33,6 +33,7 @@ from src.tag_store import Tag, TagStore
 from src.timelapse import TimelapseStack, detect_timelapse
 from src.ui_ai import AIAnalysisMixin
 from src.ui_detail import DetailMixin
+from src.ui_export import PhotoExportDialog
 from src.ui_gallery import GalleryPhoto
 from src.ui_panels import PanelsMixin
 from src.ui_tag_dialogs import TagDialogsMixin
@@ -270,6 +271,14 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
     def _paths_for_row(self, iid: str) -> tuple[str, ...]:
         return self._timelapse_paths.get(iid, (iid,))
 
+    def export_selected_photos(self) -> None:
+        sources = [info.path for info in self._selected_infos() if is_supported(info.category)]
+        if not sources:
+            return
+        chosen = filedialog.askdirectory(parent=self.root, title="选择导出文件夹", mustexist=True)
+        if chosen:
+            PhotoExportDialog(self, sources, Path(chosen))
+
     def start_result_selection(self) -> None:
         if self._selecting_results or not self.result_tree.get_children():
             return
@@ -344,6 +353,8 @@ class PhotoClassifierApp(PanelsMixin, DetailMixin, TagDialogsMixin, AIAnalysisMi
         else:
             self.btn_leave_selection.pack_forget()
         self.btn_batch_tag.config(state="normal" if count else "disabled", fg=TEXT if count else TEXT_FAINT)
+        can_export = any(is_supported(self.infos_by_iid[iid].category) for iid in self._selected_iids)
+        self.btn_export.config(state="normal" if can_export else "disabled")
         self.btn_select_page.config(
             text="取消本页选择" if page and len(selection) == len(page) else "全选本页",
             state="normal" if page else "disabled",

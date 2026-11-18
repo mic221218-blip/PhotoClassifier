@@ -64,13 +64,13 @@ def open_with_default_app(path: str | Path) -> tuple[bool, str | None]:
     try:
         if not target.exists():
             return False, f"文件不存在：{target}"
+        suffix = "" if target.is_dir() else target.suffix.lower()
     except OSError as exc:
         return False, f"无法访问文件：{exc}"
 
     if not hasattr(os, "startfile"):
         return False, "当前系统不支持用默认程序打开文件"
 
-    suffix = target.suffix.lower()
     if suffix in _IMAGE_SUFFIXES | _RAW_SUFFIXES:
         # 图片统一用 Windows“照片”打开（这台机器上 .NEF/.PNG 的默认关联是
         # 第三方看图工具，用户要的是“照片”这样的查看体验）

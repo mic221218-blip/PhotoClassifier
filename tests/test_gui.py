@@ -666,7 +666,53 @@ def test_raw_filter_check_and_summary_in_both_views(root, db_path, tmp_path) -> 
         app.db.close()
 
 
-def test_raw_filter_preserves_timelapse_folding_and_limits_stack_selection(root, db_path, tmp_path) -> None:
+def test_export_button_copies_the_cross_page_selection_after_confirmation(root, db_path, tmp_path, monkeypatch):
+    monkeypatch.setattr(gui, "RESULT_PAGE_SIZE", 2)
+    files = [tmp_path / name for name in ("a.NEF", "b.JPG", "c.PNG", "z.MOV")]
+    for path in files:
+        path.write_bytes(path.name.encode())
+    destination = tmp_path / "export"
+    destination.mkdir()
+    monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **_kwargs: str(destination))
+
+    app = PhotoClassifierApp(root, db_path)
+    try:
+        app.db.add_folder(tmp_path)
+        app.db.upsert_many([make_info(path, category=classify_file(path)) for path in files])
+        app.refresh_library()
+        app.refresh_results()
+        app.start_result_selection()
+        app._select_result_row(str(files[0]))
+        app.change_result_page(1)
+        app._select_result_row(str(files[2]))
+        app._select_result_row(str(files[3]))
+
+        app.btn_export.invoke()
+        dialog, = (widget for widget in root.winfo_children() if isinstance(widget, gui.PhotoExportDialog))
+        assert dialog._heading["text"] == "将复制 2 个照片文件"
+        assert not list(destination.iterdir())
+        dialog._close_button.invoke()
+        assert not dialog.winfo_exists()
+        assert not list(destination.iterdir())
+
+        app.btn_export.invoke()
+        dialog, = (widget for widget in root.winfo_children() if isinstance(widget, gui.PhotoExportDialog))
+        dialog._action.invoke()
+        deadline = time.monotonic() + 5
+        while dialog._running and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        assert dialog._detail["text"] == "成功 2  ·  跳过 0  ·  失败 0"
+        assert {path.name: path.read_bytes() for path in destination.iterdir()} == {
+            path.name: path.read_bytes() for path in (files[0], files[2])
+        }
+    finally:
+        app.tag_store.close()
+        app.quality_store.close()
+        app.db.close()
+
+
+def test_raw_filter_preserves_timelapse_folding_and_limits_stack_selection(root, db_path, tmp_path, monkeypatch) -> None:
     from datetime import datetime, timedelta
 
     start = datetime(2026, 9, 18, 6, 10)
@@ -707,6 +753,11 @@ def test_raw_filter_preserves_timelapse_folding_and_limits_stack_selection(root,
         assert str(card.info.path) in raw_frames
         assert card.title == app.detail_name["text"] == "延时 · 4 帧"
         assert {str(info.path) for info in app._selected_infos()} == set(raw_frames)
+        export_sources = []
+        monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **_kwargs: str(tmp_path))
+        monkeypatch.setattr(gui, "PhotoExportDialog", lambda _app, sources, _destination: export_sources.extend(sources))
+        app.btn_export.invoke()
+        assert set(export_sources) == {Path(path) for path in raw_frames}
 
         app.cancel_result_selection()
         app._focus_gallery_photo(stack_id)
